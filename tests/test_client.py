@@ -1,5 +1,4 @@
-import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -26,13 +25,21 @@ def now() -> datetime:
     return datetime.now(tz=UTC)
 
 
+type RespT = Response | Callable[[web.WebSocketResponse], Awaitable[Response]]
+
+
 class App:
     def __init__(self, token: str) -> None:
         self.url = URL()  # initialize later
         self._token = token
-        self._resps: list[tuple[type[Message], Response]] = []
+        self._resps: list[
+            tuple[
+                type[Message],
+                RespT,
+            ]
+        ] = []
 
-    def add_resp(self, ev: type[Message], resp: Response) -> None:
+    def add_resp(self, ev: type[Message], resp: RespT) -> None:
         self._resps.append((ev, resp))
 
     async def ws(self, req: web.Request) -> web.WebSocketResponse:
@@ -55,6 +62,8 @@ class App:
                     ).model_dump_json()
                 )
             else:
+                if callable(resp):
+                    resp = await resp(ws)
                 resp = resp.model_copy(update={"timestamp": now()})
                 await ws.send_str(resp.model_dump_json())
 
@@ -81,14 +90,17 @@ async def server(token: str, aiohttp_server: AiohttpServer) -> App:
 
 @pytest.fixture
 async def raw_client(server: App, token: str) -> AsyncIterator[RawEventsClient]:
-    cl = RawEventsClient(server.url, token)
+    async def nothing() -> None:
+        return
+
+    cl = RawEventsClient(url=server.url, token=token, on_ws_connect=nothing)
     yield cl
     await cl.aclose()
 
 
 @pytest.fixture
 async def client(server: App, token: str) -> AsyncIterator[EventsClient]:
-    cl = EventsClient(server.url, token)
+    cl = EventsClient(url=server.url, token=token)
     yield cl
     await cl.aclose()
 
@@ -100,8 +112,7 @@ async def test_raw_send_recv(server: App, raw_client: RawEventsClient) -> None:
         SendEvent(sender="test-sender", stream="test-stream", event_type="test-event")
     )
 
-    it = raw_client.iter_received()
-    msg = await anext(it)
+    msg = await raw_client.receive()
     assert isinstance(msg, Sent)
     assert msg.events == events
 
@@ -122,9 +133,8 @@ async def test_raw_send_err(server: App, raw_client: RawEventsClient) -> None:
         SendEvent(sender="test-sender", stream="test-stream", event_type="test-event")
     )
 
-    it = raw_client.iter_received()
     with pytest.raises(ServerError) as ctx:
-        await anext(it)
+        await raw_client.receive()
 
     assert ctx.value.code == "err-code"
     assert ctx.value.descr == "err-descr"
@@ -133,16 +143,26 @@ async def test_raw_send_err(server: App, raw_client: RawEventsClient) -> None:
     assert ctx.value.msg_id == msg_id
 
 
-async def test_close_on_ws_closing(server: App, client: EventsClient) -> None:
-    async def f() -> None:
-        async for msg in client.iter_received():
-            assert msg is not None
+async def test_raw_none_on_ws_closing(server: App, raw_client: RawEventsClient) -> None:
+    attempt = 0
 
-    async with asyncio.TaskGroup() as tg:
-        t: asyncio.Task[None] = tg.create_task(f())
+    async def resp(srv_ws: web.WebSocketResponse) -> Sent:
+        nonlocal attempt
+        attempt += 1
+        if attempt < 3:
+            await srv_ws.close()
+        return Sent(events=events)
 
-        await client._raw_client.aclose()
+    ws = await raw_client._lazy_init()
 
-        assert await client._task is None
+    events = [SentItem(id=uuid4(), stream="test-stream", tag="12345", timestamp=now())]
+    server.add_resp(SendEvent, resp)
 
-        assert await t is None
+    assert ws is raw_client._ws
+
+    await raw_client.send(
+        SendEvent(sender="test-sender", stream="test-stream", event_type="test-event")
+    )
+
+    msg = await raw_client.receive()
+    assert msg is None

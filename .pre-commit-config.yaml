@@ -23,6 +23,10 @@ repos:
   rev: 0.2.2
   hooks:
     - id: checkmake
+- repo: https://github.com/aio-libs/sort-all
+  rev: v1.3.0
+  hooks:
+  - id: sort-all
 - repo: https://github.com/astral-sh/ruff-pre-commit
   rev: v0.12.1
   hooks:

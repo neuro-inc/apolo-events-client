@@ -1,6 +1,8 @@
 import asyncio
-from collections.abc import AsyncIterator
+import logging
+from collections.abc import Awaitable, Callable
 from types import TracebackType
+from uuid import UUID
 
 import aiohttp
 from aiohttp import hdrs
@@ -10,20 +12,38 @@ from ._exceptions import ServerError
 from ._messages import (
     ClientMsgTypes,
     Error,
+    EventType,
+    JsonT,
     Pong,
+    SendEvent,
+    Sent,
+    SentItem,
     ServerMessage,
     ServerMsgTypes,
+    StreamType,
 )
 
 
+log = logging.getLogger(__package__)
+
+
 class RawEventsClient:
-    def __init__(self, url: URL | str, token: str, *, ping_delay: float = 60) -> None:
-        self._closing = False
+    def __init__(
+        self,
+        *,
+        url: URL | str,
+        token: str,
+        ping_delay: float = 60,
+        on_ws_connect: Callable[[], Awaitable[None]],
+    ) -> None:
         self._url = URL(url)
         self._token = token
+        self._closing = False
+        self._lock = asyncio.Lock()
         self._session: aiohttp.ClientSession | None = None
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._ping_delay = ping_delay
+        self._on_ws_connect = on_ws_connect
 
     async def _lazy_init(self) -> aiohttp.ClientWebSocketResponse:
         if self._closing:
@@ -32,9 +52,13 @@ class RawEventsClient:
         if self._session is None:
             self._session = aiohttp.ClientSession()
 
-            self._ws = await self._session.ws_connect(
-                self._url, headers={hdrs.AUTHORIZATION: "Bearer " + self._token}
-            )
+        if self._ws is None or self._ws.closed:
+            async with self._lock:
+                if self._ws is None or self._ws.closed:
+                    self._ws = await self._session.ws_connect(
+                        self._url, headers={hdrs.AUTHORIZATION: "Bearer " + self._token}
+                    )
+                    await self._on_ws_connect()
         assert self._ws is not None
         return self._ws
 
@@ -50,52 +74,85 @@ class RawEventsClient:
         await self.aclose()
 
     async def aclose(self) -> None:
-        if self._closing:
-            return
         self._closing = True
         if self._ws is not None:
-            await self._ws.close()
+            ws = self._ws
             self._ws = None
+            await ws.close()
         if self._session is not None:
             await self._session.close()
             self._session = None
 
+    async def _close_ws(self, ws: aiohttp.ClientWebSocketResponse) -> None:
+        if self._ws is ws:
+            self._ws = None
+            await ws.close()
+
     async def send(self, msg: ClientMsgTypes) -> None:
         """Send a message through the wire."""
-        ws = await self._lazy_init()
-        await ws.send_str(msg.model_dump_json())
+        while not self._closing:
+            ws = await self._lazy_init()
+            try:
+                await ws.send_str(msg.model_dump_json())
+                return
+            except aiohttp.ClientError:
+                await self._close_ws(ws)
 
-    async def iter_received(self) -> AsyncIterator[ServerMsgTypes]:
-        """Receive next upcoming message"""
-        ws = await self._lazy_init()
-        try:
-            async for ws_msg in ws:
-                assert ws_msg.type == aiohttp.WSMsgType.TEXT
-                resp = ServerMessage.model_validate_json(ws_msg.data)
-                match resp.root:
-                    case Pong():
-                        pass
-                    case Error() as err:
-                        raise ServerError(
-                            err.code,
-                            err.descr,
-                            err.details_head,
-                            err.details,
-                            err.msg_id,
-                        )
-                    case _:
-                        yield resp.root
-        except Exception:
-            await ws.close()
-            self._ws = None
-            raise
+    async def receive(self) -> ServerMsgTypes | None:
+        """Receive next upcoming message.
+
+        Returns None if the client is closed."""
+        while not self._closing:
+            ws = await self._lazy_init()
+            try:
+                ws_msg = await ws.receive()
+            except aiohttp.ClientError:
+                log.info("Reconnect on transport error", exc_info=True)
+                await self._close_ws(ws)
+                return None
+            if ws_msg.type in (
+                aiohttp.WSMsgType.CLOSE,
+                aiohttp.WSMsgType.CLOSING,
+                aiohttp.WSMsgType.CLOSED,
+            ):
+                log.info("Reconnect on closing transport [%s]", ws_msg.type)
+                self._ws = None
+                return None
+            if ws_msg.type == aiohttp.WSMsgType.BINARY:
+                log.warning("Ignore unexpected BINARY message")
+                continue
+
+            assert ws_msg.type == aiohttp.WSMsgType.TEXT
+            resp = ServerMessage.model_validate_json(ws_msg.data)
+            match resp.root:
+                case Pong():
+                    pass
+                case Error() as err:
+                    raise ServerError(
+                        err.code,
+                        err.descr,
+                        err.details_head,
+                        err.details,
+                        err.msg_id,
+                    )
+                case _:
+                    return resp.root
+
+        return None
 
 
 class EventsClient:
-    def __init__(self, url: URL | str, token: str, *, ping_delay: float = 60) -> None:
-        self._raw_client = RawEventsClient(url, token, ping_delay=ping_delay)
-        self._out: asyncio.Queue[ServerMsgTypes | Exception] = asyncio.Queue(10_000)
+    def __init__(self, *, url: URL | str, token: str, ping_delay: float = 60) -> None:
+        self._closing = False
+        self._raw_client = RawEventsClient(
+            url=url,
+            token=token,
+            ping_delay=ping_delay,
+            on_ws_connect=self._on_ws_connect,
+        )
         self._task = asyncio.create_task(self._loop())
+
+        self._sent: dict[UUID, asyncio.Future[SentItem]] = {}
 
     async def __aenter__(self) -> None:
         await self._raw_client.__aenter__()
@@ -109,32 +166,58 @@ class EventsClient:
         await self.aclose()
 
     async def aclose(self) -> None:
+        self._closing = True
         await self._raw_client.aclose()
-        self._out.shutdown()
-        await self._out.join()
-
-    async def iter_received(self) -> AsyncIterator[ServerMsgTypes]:
-        while True:
-            try:
-                val = await self._out.get()
-            except asyncio.QueueShutDown:
-                # WebSocket is closed
-                return
-            self._out.task_done()
-            if isinstance(val, Exception):
-                raise val
-            else:
-                yield val
 
     async def _loop(self) -> None:
         try:
-            while True:
+            while not self._closing:
                 await self._loop_once()
-        except aiohttp.ClientError:
-            self._out.shutdown()
         except Exception as ex:
-            await self._out.put(ex)
+            for fut in self._sent.values():
+                if not fut.done():
+                    fut.set_exception(ex)
 
     async def _loop_once(self) -> None:
-        async for msg in self._raw_client.iter_received():
-            await self._out.put(msg)
+        msg = await self._raw_client.receive()
+        match msg:
+            case None:
+                pass
+            case Sent():
+                for event in msg.events:
+                    try:
+                        fut = self._sent.pop(event.id)
+                    except KeyError:
+                        pass
+                    fut.set_result(event)
+
+    async def _on_ws_connect(self) -> None:
+        pass
+
+    async def send(
+        self,
+        *,
+        sender: str,
+        stream: StreamType,
+        event_type: EventType,
+        org: str | None = None,
+        cluster: str | None = None,
+        project: str | None = None,
+        user: str | None = None,
+        **kwargs: JsonT,
+    ) -> SentItem:
+        ev = SendEvent(
+            sender=sender,
+            stream=stream,
+            event_type=event_type,
+            org=org,
+            cluster=cluster,
+            project=project,
+            user=user,
+            **kwargs,
+        )
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[SentItem] = loop.create_future()
+        self._sent[ev.id] = fut
+        await self._raw_client.send(ev)
+        return await fut
