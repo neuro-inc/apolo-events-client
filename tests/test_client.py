@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from uuid import uuid4
@@ -10,12 +11,14 @@ from yarl import URL
 from apolo_events_client import (
     ClientMessage,
     Error,
+    EventsClient,
     Message,
     RawEventsClient,
     Response,
     SendEvent,
     Sent,
     SentItem,
+    ServerError,
 )
 
 
@@ -83,7 +86,14 @@ async def raw_client(server: App, token: str) -> AsyncIterator[RawEventsClient]:
     await cl.aclose()
 
 
-async def test_send_recv(server: App, raw_client: RawEventsClient) -> None:
+@pytest.fixture
+async def client(server: App, token: str) -> AsyncIterator[EventsClient]:
+    cl = EventsClient(server.url, token)
+    yield cl
+    await cl.aclose()
+
+
+async def test_raw_send_recv(server: App, raw_client: RawEventsClient) -> None:
     events = [SentItem(id=uuid4(), stream="test-stream", tag="12345", timestamp=now())]
     server.add_resp(SendEvent, Sent(events=events))
     await raw_client.send(
@@ -94,3 +104,45 @@ async def test_send_recv(server: App, raw_client: RawEventsClient) -> None:
     msg = await anext(it)
     assert isinstance(msg, Sent)
     assert msg.events == events
+
+
+async def test_raw_send_err(server: App, raw_client: RawEventsClient) -> None:
+    msg_id = uuid4()
+    server.add_resp(
+        SendEvent,
+        Error(
+            code="err-code",
+            descr="err-descr",
+            details_head="head",
+            details=["a", "b"],
+            msg_id=msg_id,
+        ),
+    )
+    await raw_client.send(
+        SendEvent(sender="test-sender", stream="test-stream", event_type="test-event")
+    )
+
+    it = raw_client.iter_received()
+    with pytest.raises(ServerError) as ctx:
+        await anext(it)
+
+    assert ctx.value.code == "err-code"
+    assert ctx.value.descr == "err-descr"
+    assert ctx.value.details_head == "head"
+    assert ctx.value.details == ["a", "b"]
+    assert ctx.value.msg_id == msg_id
+
+
+async def test_close_on_ws_closing(server: App, client: EventsClient) -> None:
+    async def f() -> None:
+        async for msg in client.iter_received():
+            assert msg is not None
+
+    async with asyncio.TaskGroup() as tg:
+        t: asyncio.Task[None] = tg.create_task(f())
+
+        await client._raw_client.aclose()
+
+        assert await client._task is None
+
+        assert await t is None

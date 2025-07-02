@@ -1,4 +1,4 @@
-from ._client import RawEventsClient
+from ._client import EventsClient, RawEventsClient
 from ._exceptions import ServerError
 from ._messages import (
     ClientMessage,
@@ -37,4 +37,5 @@ __all__ = (
     "ServerMsgTypes",
     "StreamType",
     "Tag",
+    "EventsClient",
 )
