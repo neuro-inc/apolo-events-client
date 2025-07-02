@@ -1,0 +1,71 @@
+[project]
+name = "apolo-events-client"
+version = "0.1.0"
+description = "Apolo client for platform-events"
+readme = "README.md"
+authors = [
+    { name = "Andrew Svetlov", email = "andrew.svetlov@gmail.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "aiohttp[speedups]>=3.12.7",
+    "pydantic>=2.11.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.16.1",
+    "pytest>=8.4.1",
+    "pytest-aiohttp>=1.1.0",
+    "pytest-asyncio>=1.0.0",
+    "pytest-cov>=6.2.1",
+]
+
+
+[tool.ruff]
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "I", "C90", "UP", "B", "ASYNC", "N", "A", "C4", "EM", "FA", "ICN",
+    "G", "PIE", "T20", "PYI", "PT", "RET", "PTH", "T10"
+]
+ignore = [
+  "A003",  # Class attribute "..." is shadowing a Python builtin
+  "N818"
+]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+lines-after-imports = 2
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = "tests"
+filterwarnings = """
+    error
+    ignore::DeprecationWarning
+    ignore:Unclosed connection:ResourceWarning:aiohttp
+    """
+
+addopts = """
+    --cov=apolo_events_client
+    --cov-report=term
+    --cov-report=xml:coverage/.coverage.xml
+"""
+
+[tool.coverage.run]
+branch = true
+source = ["platform_events"]
+
+[tool.mypy]
+packages = ["apolo_events_client", "tests"]
+# files = ["tests"]
+plugins = ["pydantic.mypy"]
+strict = true
+pretty = true
