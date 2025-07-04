@@ -1,7 +1,10 @@
 import asyncio
+import dataclasses
 import logging
 from collections.abc import Awaitable, Callable, Sequence
+from datetime import UTC
 from types import TracebackType
+from typing import cast
 from uuid import UUID
 
 import aiohttp
@@ -146,8 +149,16 @@ class RawEventsClient:
         return None
 
 
+@dataclasses.dataclass
+class _SubscrData:
+    filters: tuple[FilterItem, ...] | None
+    timestamp: AwareDateTime
+
+
 class EventsClient:
-    def __init__(self, *, url: URL | str, token: str, ping_delay: float = 60) -> None:
+    def __init__(
+        self, *, url: URL | str, token: str, ping_delay: float = 60, resp_timeout=30
+    ) -> None:
         self._closing = False
         self._raw_client = RawEventsClient(
             url=url,
@@ -155,11 +166,12 @@ class EventsClient:
             ping_delay=ping_delay,
             on_ws_connect=self._on_ws_connect,
         )
+        self._resp_timeout = resp_timeout
         self._task = asyncio.create_task(self._loop())
 
         self._sent: dict[UUID, asyncio.Future[SentItem]] = {}
         self._subscribed: dict[UUID, asyncio.Future[Subscribed]] = {}
-        self._subscriptions: dict[StreamType, Subscribe] = {}
+        self._subscriptions: dict[StreamType, _SubscrData] = {}
         self._subscr_groups: dict[StreamType, SubscribeGroup] = {}
 
     async def __aenter__(self) -> None:
@@ -238,7 +250,11 @@ class EventsClient:
         fut: asyncio.Future[SentItem] = loop.create_future()
         self._sent[ev.id] = fut
         await self._raw_client.send(ev)
-        return await fut
+        try:
+            async with asyncio.timeout(self._resp_timeout):
+                return await fut
+        except TimeoutError:
+            self._sent.pop(ev.id, None)
 
     async def subscribe(
         self,
@@ -246,12 +262,21 @@ class EventsClient:
         *,
         filters: Sequence[FilterItem] | None = None,
         timestamp: AwareDateTime | None = None,
-    ) -> UUID:
+    ) -> None:
         ev = Subscribe(stream=stream, filters=filters, timestamp=timestamp)
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[Subscribed] = loop.create_future()
         self._subscribed[ev.id] = fut
+        self._subscriptions[stream] = _SubscrData(
+            ev.filters, cast(AwareDateTime, ev.timestamp or AwareDateTime.now(tz=UTC))
+        )
         await self._raw_client.send(ev)
-        ret = await fut
-        self._subscriptions[stream] = ev
-        return ret.subscr_id
+        try:
+            async with asyncio.timeout(self._resp_timeout):
+                ret = await fut
+            # reconnection could bump the timestamp
+            self._subscriptions[stream].timestamp = max(
+                ret.timestamp, self._subscriptions[stream].timestamp
+            )
+        except TimeoutError:
+            self._subscribed.pop(ev.id, None)

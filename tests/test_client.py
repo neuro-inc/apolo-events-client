@@ -111,7 +111,7 @@ async def raw_client(server: App, token: str) -> AsyncIterator[RawEventsClient]:
 
 @pytest.fixture
 async def client(server: App, token: str) -> AsyncIterator[EventsClient]:
-    cl = EventsClient(url=server.url, token=token)
+    cl = EventsClient(url=server.url, token=token, resp_timeout=0.1)
     yield cl
     await cl.aclose()
 
@@ -205,7 +205,7 @@ async def test_subscribe(server: App, client: EventsClient) -> None:
 
     server.add_resp(Subscribe, gen_resp)
     dt = now()
-    ret = await client.subscribe(
+    await client.subscribe(
         stream=StreamType("test-stream"),
         filters=[FilterItem(orgs=["o1"], projects=["p1", "p2"])],
         timestamp=dt,
@@ -213,7 +213,45 @@ async def test_subscribe(server: App, client: EventsClient) -> None:
 
     ev = server.events[-1]
     assert isinstance(ev, Subscribe)
-    assert ret == ev.id
     assert ev.stream == "test-stream"
     assert ev.filters == (FilterItem(orgs=["o1"], projects=["p1", "p2"]),)
     assert ev.timestamp == dt
+
+
+async def test_resubscribe(server: App, client: EventsClient) -> None:
+    async def gen_subscr(
+        srv_ws: web.WebSocketResponse, event: ClientMsgTypes
+    ) -> Subscribed:
+        return Subscribed(subscr_id=event.id)
+
+    server.add_resp(Subscribe, gen_subscr)
+
+    attempt = 0
+
+    async def gen_sent(srv_ws: web.WebSocketResponse, event: ClientMsgTypes) -> Sent:
+        nonlocal attempt
+        attempt += 1
+        if attempt < 2:
+            await srv_ws.close()
+            events = [
+                SentItem(id=uuid4(), stream="test-stream", tag="12345", timestamp=now())
+            ]
+        return Sent(events=events)
+
+    server.add_resp(SendEvent, gen_sent)
+
+    dt = now()
+    await client.subscribe(
+        stream=StreamType("test-stream"),
+        filters=[FilterItem(orgs=["o1"], projects=["p1", "p2"])],
+        timestamp=dt,
+    )
+
+    await client.send(
+        sender="test-sender",
+        stream=StreamType("test-stream"),
+        event_type=EventType("test-type"),
+    )
+
+    subscr = client._subscriptions[StreamType("test-stream")]
+    assert subscr.timestamp > dt
