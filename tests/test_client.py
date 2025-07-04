@@ -1,9 +1,10 @@
 from collections.abc import AsyncIterator, Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC
 from uuid import uuid4
 
 import pytest
 from aiohttp import WSMsgType, hdrs, web
+from datetype import AwareDateTime
 from pytest_aiohttp import AiohttpServer
 from yarl import URL
 
@@ -13,6 +14,7 @@ from apolo_events_client import (
     Error,
     EventsClient,
     EventType,
+    FilterItem,
     Message,
     RawEventsClient,
     Response,
@@ -21,11 +23,13 @@ from apolo_events_client import (
     SentItem,
     ServerError,
     StreamType,
+    Subscribe,
+    Subscribed,
 )
 
 
-def now() -> datetime:
-    return datetime.now(tz=UTC)
+def now() -> AwareDateTime:
+    return AwareDateTime.now(tz=UTC)
 
 
 type RespT = (
@@ -43,6 +47,7 @@ class App:
                 RespT,
             ]
         ] = []
+        self.events: list[ClientMsgTypes] = []
 
     def add_resp(self, ev: type[Message], resp: RespT) -> None:
         self._resps.append((ev, resp))
@@ -58,6 +63,7 @@ class App:
             assert ws_msg.type == WSMsgType.TEXT
             msg = ClientMessage.model_validate_json(ws_msg.data)
             event = msg.root
+            self.events.append(event)
             expected_type, resp = self._resps.pop(0)
             if type(event) is not expected_type:
                 await ws.send_str(
@@ -189,3 +195,25 @@ async def test_send(server: App, client: EventsClient) -> None:
 
     assert isinstance(ret, SentItem)
     assert ret.tag == "12345"
+
+
+async def test_subscribe(server: App, client: EventsClient) -> None:
+    async def gen_resp(
+        srv_ws: web.WebSocketResponse, event: ClientMsgTypes
+    ) -> Subscribed:
+        return Subscribed(subscr_id=event.id)
+
+    server.add_resp(Subscribe, gen_resp)
+    dt = now()
+    ret = await client.subscribe(
+        stream=StreamType("test-stream"),
+        filters=[FilterItem(orgs=["o1"], projects=["p1", "p2"])],
+        timestamp=dt,
+    )
+
+    ev = server.events[-1]
+    assert isinstance(ev, Subscribe)
+    assert ret == ev.id
+    assert ev.stream == "test-stream"
+    assert ev.filters == (FilterItem(orgs=["o1"], projects=["p1", "p2"]),)
+    assert ev.timestamp == dt

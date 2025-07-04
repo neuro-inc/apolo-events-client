@@ -23,6 +23,9 @@ from ._messages import (
     ServerMessage,
     ServerMsgTypes,
     StreamType,
+    Subscribe,
+    Subscribed,
+    SubscribeGroup,
 )
 
 
@@ -155,6 +158,9 @@ class EventsClient:
         self._task = asyncio.create_task(self._loop())
 
         self._sent: dict[UUID, asyncio.Future[SentItem]] = {}
+        self._subscribed: dict[UUID, asyncio.Future[Subscribed]] = {}
+        self._subscriptions: dict[StreamType, Subscribe] = {}
+        self._subscr_groups: dict[StreamType, SubscribeGroup] = {}
 
     async def __aenter__(self) -> None:
         await self._raw_client.__aenter__()
@@ -187,13 +193,21 @@ class EventsClient:
                 pass
             case Sent():
                 for event in msg.events:
-                    try:
-                        fut = self._sent.pop(event.id)
-                        fut.set_result(event)
-                    except KeyError:
+                    sent_fut = self._sent.pop(event.id, None)
+                    if sent_fut is not None:
+                        sent_fut.set_result(event)
+                    else:
                         log.warning(
                             "Received Sent response for unknown id %s", event.id
                         )
+            case Subscribed():
+                subscr_fut = self._subscribed.pop(msg.subscr_id, None)
+                if subscr_fut is not None:
+                    subscr_fut.set_result(msg)
+                else:
+                    log.warning(
+                        "Received Subscribed response for unknown id %s", msg.id
+                    )
 
     async def _on_ws_connect(self) -> None:
         pass
@@ -233,4 +247,11 @@ class EventsClient:
         filters: Sequence[FilterItem] | None = None,
         timestamp: AwareDateTime | None = None,
     ) -> UUID:
-        pass
+        ev = Subscribe(stream=stream, filters=filters, timestamp=timestamp)
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[Subscribed] = loop.create_future()
+        self._subscribed[ev.id] = fut
+        await self._raw_client.send(ev)
+        ret = await fut
+        self._subscriptions[stream] = ev
+        return ret.subscr_id
