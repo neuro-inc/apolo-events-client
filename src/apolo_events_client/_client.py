@@ -157,7 +157,12 @@ class _SubscrData:
 
 class EventsClient:
     def __init__(
-        self, *, url: URL | str, token: str, ping_delay: float = 60, resp_timeout=30
+        self,
+        *,
+        url: URL | str,
+        token: str,
+        ping_delay: float = 60,
+        resp_timeout: float = 30,
     ) -> None:
         self._closing = False
         self._raw_client = RawEventsClient(
@@ -222,7 +227,10 @@ class EventsClient:
                     )
 
     async def _on_ws_connect(self) -> None:
-        pass
+        for stream, data in self._subscriptions.items():
+            await self.subscribe(
+                stream=stream, filters=data.filters, timestamp=data.timestamp
+            )
 
     async def send(
         self,
@@ -235,7 +243,7 @@ class EventsClient:
         project: str | None = None,
         user: str | None = None,
         **kwargs: JsonT,
-    ) -> SentItem:
+    ) -> SentItem | None:
         ev = SendEvent(
             sender=sender,
             stream=stream,
@@ -255,6 +263,9 @@ class EventsClient:
                 return await fut
         except TimeoutError:
             self._sent.pop(ev.id, None)
+            # in case of timeout, we don't want to raise an exception
+            # do we need a strategy for resending unconfirmed events?
+            return None
 
     async def subscribe(
         self,
@@ -279,4 +290,6 @@ class EventsClient:
                 ret.timestamp, self._subscriptions[stream].timestamp
             )
         except TimeoutError:
+            # On reconnection, we re-subscribe for everything.
+            # Thus, the method never fails
             self._subscribed.pop(ev.id, None)
