@@ -1,11 +1,12 @@
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from types import TracebackType
 from uuid import UUID
 
 import aiohttp
 from aiohttp import hdrs
+from datetype import AwareDateTime
 from yarl import URL
 
 from ._exceptions import ServerError
@@ -13,6 +14,7 @@ from ._messages import (
     ClientMsgTypes,
     Error,
     EventType,
+    FilterItem,
     JsonT,
     Pong,
     SendEvent,
@@ -187,9 +189,11 @@ class EventsClient:
                 for event in msg.events:
                     try:
                         fut = self._sent.pop(event.id)
+                        fut.set_result(event)
                     except KeyError:
-                        pass
-                    fut.set_result(event)
+                        log.warning(
+                            "Received Sent response for unknown id %s", event.id
+                        )
 
     async def _on_ws_connect(self) -> None:
         pass
@@ -221,3 +225,12 @@ class EventsClient:
         self._sent[ev.id] = fut
         await self._raw_client.send(ev)
         return await fut
+
+    async def subscribe(
+        self,
+        stream: StreamType,
+        *,
+        filters: Sequence[FilterItem] | None = None,
+        timestamp: AwareDateTime | None = None,
+    ) -> UUID:
+        pass

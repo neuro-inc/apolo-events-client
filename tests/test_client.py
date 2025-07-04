@@ -9,8 +9,10 @@ from yarl import URL
 
 from apolo_events_client import (
     ClientMessage,
+    ClientMsgTypes,
     Error,
     EventsClient,
+    EventType,
     Message,
     RawEventsClient,
     Response,
@@ -18,6 +20,7 @@ from apolo_events_client import (
     Sent,
     SentItem,
     ServerError,
+    StreamType,
 )
 
 
@@ -25,7 +28,9 @@ def now() -> datetime:
     return datetime.now(tz=UTC)
 
 
-type RespT = Response | Callable[[web.WebSocketResponse], Awaitable[Response]]
+type RespT = (
+    Response | Callable[[web.WebSocketResponse, ClientMsgTypes], Awaitable[Response]]
+)
 
 
 class App:
@@ -63,7 +68,7 @@ class App:
                 )
             else:
                 if callable(resp):
-                    resp = await resp(ws)
+                    resp = await resp(ws, event)
                 resp = resp.model_copy(update={"timestamp": now()})
                 await ws.send_str(resp.model_dump_json())
 
@@ -146,7 +151,7 @@ async def test_raw_send_err(server: App, raw_client: RawEventsClient) -> None:
 async def test_raw_none_on_ws_closing(server: App, raw_client: RawEventsClient) -> None:
     attempt = 0
 
-    async def resp(srv_ws: web.WebSocketResponse) -> Sent:
+    async def resp(srv_ws: web.WebSocketResponse, event: ClientMsgTypes) -> Sent:
         nonlocal attempt
         attempt += 1
         if attempt < 3:
@@ -166,3 +171,21 @@ async def test_raw_none_on_ws_closing(server: App, raw_client: RawEventsClient) 
 
     msg = await raw_client.receive()
     assert msg is None
+
+
+async def test_send(server: App, client: EventsClient) -> None:
+    async def gen_resp(srv_ws: web.WebSocketResponse, event: ClientMsgTypes) -> Sent:
+        events = [
+            SentItem(id=event.id, stream="test-stream", tag="12345", timestamp=now())
+        ]
+        return Sent(events=events)
+
+    server.add_resp(SendEvent, gen_resp)
+    ret = await client.send(
+        sender="test-sender",
+        stream=StreamType("test-stream"),
+        event_type=EventType("test-event"),
+    )
+
+    assert isinstance(ret, SentItem)
+    assert ret.tag == "12345"

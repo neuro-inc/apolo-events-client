@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "aiohttp[speedups]>=3.12.7",
+    "datetype>=2025.2.13",
     "pydantic>=2.11.5",
 ]
 
