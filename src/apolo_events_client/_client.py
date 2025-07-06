@@ -2,24 +2,25 @@ import asyncio
 import dataclasses
 import logging
 from collections.abc import Awaitable, Callable, Sequence
-from datetime import UTC
+from datetime import UTC, datetime
 from types import TracebackType
-from typing import cast
 from uuid import UUID
 
 import aiohttp
 from aiohttp import hdrs
-from datetype import AwareDateTime
 from yarl import URL
 
 from ._exceptions import ServerError
 from ._messages import (
+    Ack,
     ClientMsgTypes,
     Error,
     EventType,
     FilterItem,
+    GroupName,
     JsonT,
     Pong,
+    RecvEvent,
     SendEvent,
     Sent,
     SentItem,
@@ -29,6 +30,8 @@ from ._messages import (
     Subscribe,
     Subscribed,
     SubscribeGroup,
+    Tag,
+    _RecvEvents,
 )
 
 
@@ -149,10 +152,20 @@ class RawEventsClient:
         return None
 
 
-@dataclasses.dataclass
-class _SubscrData:
+@dataclasses.dataclass(kw_only=True)
+class _BaseSubscrData:
     filters: tuple[FilterItem, ...] | None
-    timestamp: AwareDateTime
+    callback: Callable[[RecvEvent], Awaitable[None]]
+
+
+@dataclasses.dataclass(kw_only=True)
+class _SubscrData(_BaseSubscrData):
+    timestamp: datetime
+
+
+@dataclasses.dataclass(kw_only=True)
+class _SubscrGroupData(_BaseSubscrData):
+    groupname: GroupName
 
 
 class EventsClient:
@@ -177,7 +190,7 @@ class EventsClient:
         self._sent: dict[UUID, asyncio.Future[SentItem]] = {}
         self._subscribed: dict[UUID, asyncio.Future[Subscribed]] = {}
         self._subscriptions: dict[StreamType, _SubscrData] = {}
-        self._subscr_groups: dict[StreamType, SubscribeGroup] = {}
+        self._subscr_groups: dict[StreamType, _SubscrGroupData] = {}
 
     async def __aenter__(self) -> None:
         await self._raw_client.__aenter__()
@@ -225,11 +238,30 @@ class EventsClient:
                     log.warning(
                         "Received Subscribed response for unknown id %s", msg.id
                     )
+            case _RecvEvents():
+                for ev in msg.events:
+                    stream = ev.stream
+                    data1 = self._subscriptions.get(stream)
+                    if data1:
+                        await data1.callback(ev)
+                    data2 = self._subscr_groups.get(stream)
+                    if data2:
+                        await data2.callback(ev)
 
     async def _on_ws_connect(self) -> None:
-        for stream, data in self._subscriptions.items():
+        for stream, data1 in self._subscriptions.items():
             await self.subscribe(
-                stream=stream, filters=data.filters, timestamp=data.timestamp
+                stream=stream,
+                filters=data1.filters,
+                timestamp=data1.timestamp,
+                callback=data1.callback,
+            )
+        for stream, data2 in self._subscr_groups.items():
+            await self.subscribe_group(
+                stream=stream,
+                filters=data2.filters,
+                groupname=data2.groupname,
+                callback=data2.callback,
             )
 
     async def send(
@@ -270,16 +302,22 @@ class EventsClient:
     async def subscribe(
         self,
         stream: StreamType,
+        callback: Callable[[RecvEvent], Awaitable[None]],
         *,
         filters: Sequence[FilterItem] | None = None,
-        timestamp: AwareDateTime | None = None,
+        timestamp: datetime | None = None,
     ) -> None:
+        if timestamp is not None and timestamp.tzinfo is None:
+            msg = "timespamp should be timezone-aware value"
+            raise TypeError(msg)
         ev = Subscribe(stream=stream, filters=filters, timestamp=timestamp)
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[Subscribed] = loop.create_future()
         self._subscribed[ev.id] = fut
         self._subscriptions[stream] = _SubscrData(
-            ev.filters, cast(AwareDateTime, ev.timestamp or AwareDateTime.now(tz=UTC))
+            filters=ev.filters,
+            timestamp=ev.timestamp or datetime.now(tz=UTC),
+            callback=callback,
         )
         await self._raw_client.send(ev)
         try:
@@ -293,3 +331,37 @@ class EventsClient:
             # On reconnection, we re-subscribe for everything.
             # Thus, the method never fails
             self._subscribed.pop(ev.id, None)
+
+    async def subscribe_group(
+        self,
+        stream: StreamType,
+        groupname: GroupName,
+        callback: Callable[[RecvEvent], Awaitable[None]],
+        *,
+        filters: Sequence[FilterItem] | None = None,
+    ) -> None:
+        ev = SubscribeGroup(stream=stream, filters=filters, groupname=groupname)
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[Subscribed] = loop.create_future()
+        self._subscribed[ev.id] = fut
+        self._subscr_groups[stream] = _SubscrGroupData(
+            filters=ev.filters,
+            groupname=groupname,
+            callback=callback,
+        )
+        await self._raw_client.send(ev)
+        try:
+            async with asyncio.timeout(self._resp_timeout):
+                ret = await fut
+            # reconnection could bump the timestamp
+            self._subscriptions[stream].timestamp = max(
+                ret.timestamp, self._subscriptions[stream].timestamp
+            )
+        except TimeoutError:
+            # On reconnection, we re-subscribe for everything.
+            # Thus, the method never fails
+            self._subscribed.pop(ev.id, None)
+
+    async def ack(self, sender: str, events: dict[StreamType, list[Tag]]) -> None:
+        ev = Ack(sender=sender, events=events)
+        await self._raw_client.send(ev)

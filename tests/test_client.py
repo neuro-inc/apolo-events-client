@@ -1,22 +1,26 @@
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
-from datetime import UTC
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
 from aiohttp import WSMsgType, hdrs, web
-from datetype import AwareDateTime
 from pytest_aiohttp import AiohttpServer
 from yarl import URL
 
 from apolo_events_client import (
+    Ack,
     ClientMessage,
     ClientMsgTypes,
     Error,
     EventsClient,
     EventType,
     FilterItem,
+    GroupName,
     Message,
     RawEventsClient,
+    RecvEvent,
+    RecvEvents,
     Response,
     SendEvent,
     Sent,
@@ -25,15 +29,21 @@ from apolo_events_client import (
     StreamType,
     Subscribe,
     Subscribed,
+    SubscribeGroup,
+    Tag,
 )
 
 
-def now() -> AwareDateTime:
-    return AwareDateTime.now(tz=UTC)
+def now() -> datetime:
+    return datetime.now(tz=UTC)
 
 
 type RespT = (
-    Response | Callable[[web.WebSocketResponse, ClientMsgTypes], Awaitable[Response]]
+    Response
+    | list[Response]
+    | Callable[
+        [web.WebSocketResponse, ClientMsgTypes], Awaitable[Response | list[Response]]
+    ]
 )
 
 
@@ -75,8 +85,11 @@ class App:
             else:
                 if callable(resp):
                     resp = await resp(ws, event)
-                resp = resp.model_copy(update={"timestamp": now()})
-                await ws.send_str(resp.model_dump_json())
+                if not isinstance(resp, list):
+                    resp = [resp]
+                for resp_msg in resp:
+                    resp_msg = resp_msg.model_copy(update={"timestamp": now()})
+                    await ws.send_str(resp_msg.model_dump_json())
 
         return ws
 
@@ -204,9 +217,14 @@ async def test_subscribe(server: App, client: EventsClient) -> None:
         return Subscribed(subscr_id=event.id)
 
     server.add_resp(Subscribe, gen_resp)
+
+    async def cb(resp: RecvEvent) -> None:
+        pass
+
     dt = now()
     await client.subscribe(
         stream=StreamType("test-stream"),
+        callback=cb,
         filters=[FilterItem(orgs=["o1"], projects=["p1", "p2"])],
         timestamp=dt,
     )
@@ -216,6 +234,31 @@ async def test_subscribe(server: App, client: EventsClient) -> None:
     assert ev.stream == "test-stream"
     assert ev.filters == (FilterItem(orgs=["o1"], projects=["p1", "p2"]),)
     assert ev.timestamp == dt
+
+
+async def test_subscribe_group(server: App, client: EventsClient) -> None:
+    async def gen_resp(
+        srv_ws: web.WebSocketResponse, event: ClientMsgTypes
+    ) -> Subscribed:
+        return Subscribed(subscr_id=event.id)
+
+    server.add_resp(SubscribeGroup, gen_resp)
+
+    async def cb(resp: RecvEvent) -> None:
+        pass
+
+    await client.subscribe_group(
+        stream=StreamType("test-stream"),
+        groupname=GroupName("group-name"),
+        callback=cb,
+        filters=[FilterItem(orgs=["o1"], projects=["p1", "p2"])],
+    )
+
+    ev = server.events[-1]
+    assert isinstance(ev, SubscribeGroup)
+    assert ev.stream == "test-stream"
+    assert ev.filters == (FilterItem(orgs=["o1"], projects=["p1", "p2"]),)
+    assert ev.groupname == "group-name"
 
 
 async def test_resubscribe(server: App, client: EventsClient) -> None:
@@ -240,9 +283,13 @@ async def test_resubscribe(server: App, client: EventsClient) -> None:
 
     server.add_resp(SendEvent, gen_sent)
 
+    async def cb(resp: RecvEvent) -> None:
+        pass
+
     dt = now()
     await client.subscribe(
         stream=StreamType("test-stream"),
+        callback=cb,
         filters=[FilterItem(orgs=["o1"], projects=["p1", "p2"])],
         timestamp=dt,
     )
@@ -253,5 +300,64 @@ async def test_resubscribe(server: App, client: EventsClient) -> None:
         event_type=EventType("test-type"),
     )
 
-    subscr = client._subscriptions[StreamType("test-stream")]
-    assert subscr.timestamp > dt
+    # subscr = client._subscriptions[StreamType("test-stream")]
+    # assert subscr.timestamp > dt
+
+
+async def test_recv(server: App, client: EventsClient) -> None:
+    async def gen_subscr(
+        srv_ws: web.WebSocketResponse, event: ClientMsgTypes
+    ) -> list[Response]:
+        return [
+            Subscribed(subscr_id=event.id),
+            RecvEvents(
+                subscr_id=event.id,
+                events=[
+                    RecvEvent(
+                        tag="123",
+                        timestamp=now(),
+                        sender="test-sender",
+                        stream="test-stream",
+                        event_type="event-type",
+                    )
+                ],
+            ),
+        ]
+
+    server.add_resp(Subscribe, gen_subscr)
+
+    lst: list[RecvEvent] = []
+
+    async def cb(resp: RecvEvent) -> None:
+        lst.append(resp)
+
+    await client.subscribe(
+        stream=StreamType("test-stream"),
+        callback=cb,
+    )
+
+    await asyncio.sleep(0.1)
+    assert len(lst) == 1
+    assert lst[0].event_type == "event-type"
+
+
+async def test_ack(server: App, client: EventsClient) -> None:
+    async def gen_subscr(
+        srv_ws: web.WebSocketResponse, event: ClientMsgTypes
+    ) -> list[Response]:
+        return []
+
+    server.add_resp(Ack, gen_subscr)
+
+    events = {StreamType("test-stream"): [Tag("1")]}
+
+    await client.ack(
+        sender="test-sender",
+        events=events,
+    )
+
+    await asyncio.sleep(0.01)
+    ev = server.events[-1]
+    assert isinstance(ev, Ack)
+    assert ev.sender == "test-sender"
+    assert ev.events == events

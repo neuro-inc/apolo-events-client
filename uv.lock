@@ -143,7 +143,6 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp", extra = ["speedups"] },
-    { name = "datetype" },
     { name = "pydantic" },
 ]
 
@@ -159,7 +158,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", extras = ["speedups"], specifier = ">=3.12.7" },
-    { name = "datetype", specifier = ">=2025.2.13" },
     { name = "pydantic", specifier = ">=2.11.5" },
 ]
 
@@ -415,15 +413,6 @@ wheels = [
 [package.optional-dependencies]
 toml = [
     { name = "tomli", marker = "python_full_version <= '3.11'" },
-]
-
-[[package]]
-name = "datetype"
-version = "2025.2.13"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/ec/1a/17b4f99b80dcc850a566c58622aa09b5f9bc531bc9c710d87fbda6f555f9/datetype-2025.2.13.tar.gz", hash = "sha256:7b309698cb4fcab5c68d08eeac5d9ecc84f02255ba95e5caa8cbe38d8ed3b3f3", size = 16707, upload-time = "2025-02-14T01:08:52.769Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/55/3f/61489762dd861d88cbb9671d61da69ff303bf126af95995f16e94dffb36c/datetype-2025.2.13-py3-none-any.whl", hash = "sha256:4ade1bffdb8b536c5dc3560a448a24b9ebd6dfcefbd61c491d44a372d0295930", size = 15278, upload-time = "2025-02-14T01:08:51.495Z" },
 ]
 
 [[package]]

@@ -9,7 +9,6 @@ authors = [
 requires-python = ">=3.10"
 dependencies = [
     "aiohttp[speedups]>=3.12.7",
-    "datetype>=2025.2.13",
     "pydantic>=2.11.5",
 ]
 
@@ -37,7 +36,8 @@ select = [
 ]
 ignore = [
   "A003",  # Class attribute "..." is shadowing a Python builtin
-  "N818"
+  "N818",
+  "C901",  # ... is too complex
 ]
 
 [tool.ruff.lint.isort]

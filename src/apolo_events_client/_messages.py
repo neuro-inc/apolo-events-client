@@ -237,22 +237,23 @@ class RecvEvent(BaseModel):
     user: str | None = None
 
 
-class RecvEvents(Response):
+class _RecvEvents(Response):
+    subscr_id: UUID
+    events: list[RecvEvent]
+
+
+class RecvEvents(_RecvEvents):
     kind: Literal[Kind.RECV_EVENTS] = Kind.RECV_EVENTS
-    subscr_id: UUID
-    events: list[RecvEvent]
 
 
-class RecvPastEvents(Response):
+class RecvPastEvents(_RecvEvents):
     kind: Literal[Kind.RECV_PAST_EVENTS] = Kind.RECV_PAST_EVENTS
-    subscr_id: UUID
-    events: list[RecvEvent]
 
 
 class Ack(Message):
     kind: Literal[Kind.ACK] = Kind.ACK
     sender: str
-    events: dict[StreamId, list[Tag]]
+    events: dict[StreamType, list[Tag]]
 
 
 class Error(Response):
