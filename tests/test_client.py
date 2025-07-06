@@ -124,7 +124,9 @@ async def raw_client(server: App, token: str) -> AsyncIterator[RawEventsClient]:
 
 @pytest.fixture
 async def client(server: App, token: str) -> AsyncIterator[EventsClient]:
-    cl = EventsClient(url=server.url, token=token, resp_timeout=0.1)
+    cl = EventsClient(
+        url=server.url, token=token, resp_timeout=0.1, sender="test-sender"
+    )
     yield cl
     await cl.aclose()
 
