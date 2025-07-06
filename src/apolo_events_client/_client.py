@@ -176,6 +176,7 @@ class EventsClient:
         token: str,
         ping_delay: float = 60,
         resp_timeout: float = 30,
+        sender: str | None = None,
     ) -> None:
         self._closing = False
         self._raw_client = RawEventsClient(
@@ -185,6 +186,7 @@ class EventsClient:
             on_ws_connect=self._on_ws_connect,
         )
         self._resp_timeout = resp_timeout
+        self._sender = sender
         self._task = asyncio.create_task(self._loop())
 
         self._sent: dict[UUID, asyncio.Future[SentItem]] = {}
@@ -264,12 +266,21 @@ class EventsClient:
                 callback=data2.callback,
             )
 
+    def _get_sender(self, sender: str | None) -> str:
+        if sender is not None:
+            return sender
+        sender = self._sender
+        if sender is not None:
+            return sender
+        msg = "Either initialize EventsClient with a sender or pass it explicitly"
+        raise ValueError(msg)
+
     async def send(
         self,
         *,
-        sender: str,
         stream: StreamType,
         event_type: EventType,
+        sender: str | None = None,
         org: str | None = None,
         cluster: str | None = None,
         project: str | None = None,
@@ -277,7 +288,7 @@ class EventsClient:
         **kwargs: JsonT,
     ) -> SentItem | None:
         ev = SendEvent(
-            sender=sender,
+            sender=self._get_sender(sender),
             stream=stream,
             event_type=event_type,
             org=org,
@@ -362,6 +373,8 @@ class EventsClient:
             # Thus, the method never fails
             self._subscribed.pop(ev.id, None)
 
-    async def ack(self, sender: str, events: dict[StreamType, list[Tag]]) -> None:
-        ev = Ack(sender=sender, events=events)
+    async def ack(
+        self, events: dict[StreamType, list[Tag]], *, sender: str | None = None
+    ) -> None:
+        ev = Ack(sender=self._get_sender(sender), events=events)
         await self._raw_client.send(ev)

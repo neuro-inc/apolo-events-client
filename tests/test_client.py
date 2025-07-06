@@ -124,7 +124,9 @@ async def raw_client(server: App, token: str) -> AsyncIterator[RawEventsClient]:
 
 @pytest.fixture
 async def client(server: App, token: str) -> AsyncIterator[EventsClient]:
-    cl = EventsClient(url=server.url, token=token, resp_timeout=0.1)
+    cl = EventsClient(
+        url=server.url, token=token, resp_timeout=0.1, sender="test-sender"
+    )
     yield cl
     await cl.aclose()
 
@@ -295,7 +297,6 @@ async def test_resubscribe(server: App, client: EventsClient) -> None:
     )
 
     await client.send(
-        sender="test-sender",
         stream=StreamType("test-stream"),
         event_type=EventType("test-type"),
     )
@@ -352,12 +353,12 @@ async def test_ack(server: App, client: EventsClient) -> None:
     events = {StreamType("test-stream"): [Tag("1")]}
 
     await client.ack(
-        sender="test-sender",
+        sender="test-sender2",
         events=events,
     )
 
     await asyncio.sleep(0.01)
     ev = server.events[-1]
     assert isinstance(ev, Ack)
-    assert ev.sender == "test-sender"
+    assert ev.sender == "test-sender2"
     assert ev.events == events
