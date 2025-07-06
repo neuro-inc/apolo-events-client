@@ -15,6 +15,7 @@ from apolo_events_client import (
     EventsClient,
     EventType,
     FilterItem,
+    GroupName,
     Message,
     RawEventsClient,
     RecvEvent,
@@ -27,6 +28,7 @@ from apolo_events_client import (
     StreamType,
     Subscribe,
     Subscribed,
+    SubscribeGroup,
 )
 
 
@@ -230,6 +232,31 @@ async def test_subscribe(server: App, client: EventsClient) -> None:
     assert ev.stream == "test-stream"
     assert ev.filters == (FilterItem(orgs=["o1"], projects=["p1", "p2"]),)
     assert ev.timestamp == dt
+
+
+async def test_subscribe_group(server: App, client: EventsClient) -> None:
+    async def gen_resp(
+        srv_ws: web.WebSocketResponse, event: ClientMsgTypes
+    ) -> Subscribed:
+        return Subscribed(subscr_id=event.id)
+
+    server.add_resp(SubscribeGroup, gen_resp)
+
+    async def cb(resp: RecvEvent) -> None:
+        pass
+
+    await client.subscribe_group(
+        stream=StreamType("test-stream"),
+        groupname=GroupName("group-name"),
+        callback=cb,
+        filters=[FilterItem(orgs=["o1"], projects=["p1", "p2"])],
+    )
+
+    ev = server.events[-1]
+    assert isinstance(ev, SubscribeGroup)
+    assert ev.stream == "test-stream"
+    assert ev.filters == (FilterItem(orgs=["o1"], projects=["p1", "p2"]),)
+    assert ev.groupname == "group-name"
 
 
 async def test_resubscribe(server: App, client: EventsClient) -> None:
