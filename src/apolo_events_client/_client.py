@@ -12,6 +12,7 @@ from yarl import URL
 
 from ._exceptions import ServerError
 from ._messages import (
+    Ack,
     ClientMsgTypes,
     Error,
     EventType,
@@ -29,6 +30,7 @@ from ._messages import (
     Subscribe,
     Subscribed,
     SubscribeGroup,
+    Tag,
     _RecvEvents,
 )
 
@@ -359,3 +361,7 @@ class EventsClient:
             # On reconnection, we re-subscribe for everything.
             # Thus, the method never fails
             self._subscribed.pop(ev.id, None)
+
+    async def ack(self, sender: str, events: dict[StreamType, list[Tag]]) -> None:
+        ev = Ack(sender=sender, events=events)
+        await self._raw_client.send(ev)

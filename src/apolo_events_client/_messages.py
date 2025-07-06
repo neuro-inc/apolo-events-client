@@ -253,7 +253,7 @@ class RecvPastEvents(_RecvEvents):
 class Ack(Message):
     kind: Literal[Kind.ACK] = Kind.ACK
     sender: str
-    events: dict[StreamId, list[Tag]]
+    events: dict[StreamType, list[Tag]]
 
 
 class Error(Response):

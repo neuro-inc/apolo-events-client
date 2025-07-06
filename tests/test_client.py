@@ -9,6 +9,7 @@ from pytest_aiohttp import AiohttpServer
 from yarl import URL
 
 from apolo_events_client import (
+    Ack,
     ClientMessage,
     ClientMsgTypes,
     Error,
@@ -29,6 +30,7 @@ from apolo_events_client import (
     Subscribe,
     Subscribed,
     SubscribeGroup,
+    Tag,
 )
 
 
@@ -337,3 +339,25 @@ async def test_recv(server: App, client: EventsClient) -> None:
     await asyncio.sleep(0.1)
     assert len(lst) == 1
     assert lst[0].event_type == "event-type"
+
+
+async def test_ack(server: App, client: EventsClient) -> None:
+    async def gen_subscr(
+        srv_ws: web.WebSocketResponse, event: ClientMsgTypes
+    ) -> list[Response]:
+        return []
+
+    server.add_resp(Ack, gen_subscr)
+
+    events = {StreamType("test-stream"): [Tag("1")]}
+
+    await client.ack(
+        sender="test-sender",
+        events=events,
+    )
+
+    await asyncio.sleep(0.01)
+    ev = server.events[-1]
+    assert isinstance(ev, Ack)
+    assert ev.sender == "test-sender"
+    assert ev.events == events
