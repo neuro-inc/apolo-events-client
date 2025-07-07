@@ -68,7 +68,8 @@ class RawEventsClient:
             async with self._lock:
                 if self._ws is None or self._ws.closed:
                     self._ws = await self._session.ws_connect(
-                        self._url, headers={hdrs.AUTHORIZATION: "Bearer " + self._token}
+                        self._url / "v1" / "stream",
+                        headers={hdrs.AUTHORIZATION: "Bearer " + self._token},
                     )
                     await self._on_ws_connect()
         assert self._ws is not None
