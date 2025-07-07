@@ -4,6 +4,7 @@ import logging
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from types import TracebackType
+from typing import Self
 from uuid import UUID
 
 import aiohttp
@@ -73,8 +74,9 @@ class RawEventsClient:
         assert self._ws is not None
         return self._ws
 
-    async def __aenter__(self) -> None:
+    async def __aenter__(self) -> Self:
         await self._lazy_init()
+        return self
 
     async def __aexit__(
         self,
@@ -194,8 +196,9 @@ class EventsClient:
         self._subscriptions: dict[StreamType, _SubscrData] = {}
         self._subscr_groups: dict[StreamType, _SubscrGroupData] = {}
 
-    async def __aenter__(self) -> None:
+    async def __aenter__(self) -> Self:
         await self._raw_client.__aenter__()
+        return self
 
     async def __aexit__(
         self,
