@@ -255,19 +255,37 @@ class EventsClient:
 
     async def _on_ws_connect(self) -> None:
         for stream, data1 in self._subscriptions.items():
-            await self.subscribe(
-                stream=stream,
-                filters=data1.filters,
-                timestamp=data1.timestamp,
-                callback=data1.callback,
-            )
+            try:
+                await self.subscribe(
+                    stream=stream,
+                    filters=data1.filters,
+                    timestamp=data1.timestamp,
+                    callback=data1.callback,
+                )
+            except Exception:
+                log.exception(
+                    "Failed subscribe(%r, %r, filters=%r, timestamp=%r)",
+                    stream,
+                    data1.callback,
+                    data1.filters,
+                    data1.timestamp,
+                )
         for stream, data2 in self._subscr_groups.items():
-            await self.subscribe_group(
-                stream=stream,
-                filters=data2.filters,
-                groupname=data2.groupname,
-                callback=data2.callback,
-            )
+            try:
+                await self.subscribe_group(
+                    stream=stream,
+                    filters=data2.filters,
+                    groupname=data2.groupname,
+                    callback=data2.callback,
+                )
+            except Exception:
+                log.exception(
+                    "Failed subscribe_group(%r, %r, %r, filters=%r)",
+                    stream,
+                    data2.groupname,
+                    data2.callback,
+                    data2.filters,
+                )
 
     def _get_sender(self, sender: str | None) -> str:
         if sender is not None:
