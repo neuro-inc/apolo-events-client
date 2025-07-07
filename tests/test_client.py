@@ -95,7 +95,7 @@ class App:
 
     def make_app(self) -> web.Application:
         app = web.Application()
-        app.router.add_get("/ws", self.ws)
+        app.router.add_get("/v1/stream", self.ws)
         return app
 
 
@@ -108,7 +108,7 @@ def token() -> str:
 async def server(token: str, aiohttp_server: AiohttpServer) -> App:
     app = App(token)
     srv = await aiohttp_server(app.make_app())
-    app.url = srv.make_url("/ws")
+    app.url = srv.make_url("")
     return app
 
 
