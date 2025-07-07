@@ -76,7 +76,6 @@ class RawEventsClient:
         return self._ws
 
     async def __aenter__(self) -> Self:
-        await self._lazy_init()
         return self
 
     async def __aexit__(
