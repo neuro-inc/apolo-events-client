@@ -1,6 +1,5 @@
 [project]
 name = "apolo-events-client"
-version = "25.7.1"
 description = "Apolo client for platform-events"
 readme = "README.md"
 authors = [
@@ -11,9 +10,10 @@ dependencies = [
     "aiohttp[speedups]>=3.12.7",
     "pydantic>=2.11.5",
 ]
+dynamic = ["version"]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "uv-dynamic-versioning"]
 build-backend = "hatchling.build"
 
 [dependency-groups]
@@ -26,6 +26,12 @@ dev = [
     "pytest-cov>=6.2.1",
 ]
 
+
+[tool.hatch.version]
+source = "uv-dynamic-versioning"
+
+[tool.uv-dynamic-versioning]
+fallback-version = "0.0.0"  # for dependabot
 
 [tool.ruff]
 target-version = "py313"
