@@ -1,16 +1,18 @@
+import abc
 import asyncio
 import dataclasses
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from types import TracebackType
-from typing import Self
+from typing import NotRequired, Self, TypedDict, override
 from uuid import UUID
 
 import aiohttp
 from aiohttp import hdrs
 from yarl import URL
 
+from ._constants import PING_DELAY, RESP_TIMEOUT
 from ._exceptions import ServerError
 from ._messages import (
     Ack,
@@ -161,34 +163,16 @@ class _SubscrData:
     timestamp: datetime | None = None
 
 
-class EventsClient:
-    def __init__(
-        self,
-        *,
-        url: URL | str,
-        token: str,
-        name: str,
-        ping_delay: float = 60,
-        resp_timeout: float = 30,
-    ) -> None:
-        self._closing = False
-        self._raw_client = RawEventsClient(
-            url=url,
-            token=token,
-            ping_delay=ping_delay,
-            on_ws_connect=self._on_ws_connect,
-        )
-        self._resp_timeout = resp_timeout
-        self._name = name
-        self._task = asyncio.create_task(self._loop())
+class CtorArgs(TypedDict):
+    url: URL | str
+    token: str
+    name: str
+    ping_delay: NotRequired[float]
+    resp_timeout: NotRequired[float]
 
-        self._sent: dict[UUID, asyncio.Future[SentItem]] = {}
-        self._subscribed: dict[UUID, asyncio.Future[Subscribed]] = {}
-        self._subscriptions: dict[StreamType, _SubscrData] = {}
-        self._subscr_groups: dict[StreamType, _SubscrData] = {}
 
+class AbstractEventsClient(abc.ABC):
     async def __aenter__(self) -> Self:
-        await self._raw_client.__aenter__()
         return self
 
     async def __aexit__(
@@ -199,9 +183,152 @@ class EventsClient:
     ) -> None:
         await self.aclose()
 
+    @abc.abstractmethod
+    async def aclose(self) -> None:
+        pass
+
+    @abc.abstractmethod
+    async def send(
+        self,
+        *,
+        stream: StreamType,
+        event_type: EventType,
+        sender: str | None = None,
+        org: str | None = None,
+        cluster: str | None = None,
+        project: str | None = None,
+        user: str | None = None,
+        **kwargs: JsonT,
+    ) -> SentItem | None:
+        pass
+
+    @abc.abstractmethod
+    async def subscribe(
+        self,
+        stream: StreamType,
+        callback: Callable[[RecvEvent], Awaitable[None]],
+        *,
+        filters: Sequence[FilterItem] | None = None,
+        timestamp: datetime | None = None,
+    ) -> None:
+        pass
+
+    @abc.abstractmethod
+    async def subscribe_group(
+        self,
+        stream: StreamType,
+        callback: Callable[[RecvEvent], Awaitable[None]],
+        *,
+        filters: Sequence[FilterItem] | None = None,
+    ) -> None:
+        pass
+
+    @abc.abstractmethod
+    async def ack(
+        self, events: dict[StreamType, list[Tag]], *, sender: str | None = None
+    ) -> None:
+        pass
+
+
+class DummyEventsClient(AbstractEventsClient):
+    @override
+    async def aclose(self) -> None:
+        pass
+
+    @override
+    async def send(
+        self,
+        *,
+        stream: StreamType,
+        event_type: EventType,
+        sender: str | None = None,
+        org: str | None = None,
+        cluster: str | None = None,
+        project: str | None = None,
+        user: str | None = None,
+        **kwargs: JsonT,
+    ) -> SentItem | None:
+        pass
+
+    @override
+    async def subscribe(
+        self,
+        stream: StreamType,
+        callback: Callable[[RecvEvent], Awaitable[None]],
+        *,
+        filters: Sequence[FilterItem] | None = None,
+        timestamp: datetime | None = None,
+    ) -> None:
+        pass
+
+    @override
+    async def subscribe_group(
+        self,
+        stream: StreamType,
+        callback: Callable[[RecvEvent], Awaitable[None]],
+        *,
+        filters: Sequence[FilterItem] | None = None,
+    ) -> None:
+        pass
+
+    @override
+    async def ack(
+        self, events: dict[StreamType, list[Tag]], *, sender: str | None = None
+    ) -> None:
+        pass
+
+
+class EventsClient(AbstractEventsClient):
+    def __init__(
+        self,
+        *,
+        url: URL | str,
+        token: str,
+        name: str,
+        ping_delay: float = PING_DELAY,
+        resp_timeout: float = RESP_TIMEOUT,
+    ) -> None:
+        self._closing = False
+        self._raw_client = RawEventsClient(
+            url=url,
+            token=token,
+            ping_delay=ping_delay,
+            on_ws_connect=self._on_ws_connect,
+        )
+        self._resp_timeout = resp_timeout
+        self._name = name
+        self._task: asyncio.Task[None] | None = None
+
+        self._sent: dict[UUID, asyncio.Future[SentItem]] = {}
+        self._subscribed: dict[UUID, asyncio.Future[Subscribed]] = {}
+        self._subscriptions: dict[StreamType, _SubscrData] = {}
+        self._subscr_groups: dict[StreamType, _SubscrData] = {}
+
+    async def __aenter__(self) -> Self:
+        self._lazy_init()
+        await self._raw_client.__aenter__()
+        return self
+
+    async def __aexit__(
+        self,
+        exc_typ: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        await self.aclose()
+        if self._task is not None:
+            await self._task
+
+    @override
     async def aclose(self) -> None:
         self._closing = True
         await self._raw_client.aclose()
+
+    def _lazy_init(self) -> asyncio.AbstractEventLoop:
+        loop = asyncio.get_running_loop()
+        if self._task is None:
+            self._task = asyncio.create_task(self._loop())
+        return loop
 
     async def _loop(self) -> None:
         try:
@@ -277,6 +404,7 @@ class EventsClient:
                     data.filters,
                 )
 
+    @override
     async def send(
         self,
         *,
@@ -299,7 +427,7 @@ class EventsClient:
             user=user,
             **kwargs,
         )
-        loop = asyncio.get_running_loop()
+        loop = self._lazy_init()
         fut: asyncio.Future[SentItem] = loop.create_future()
         self._sent[ev.id] = fut
         await self._raw_client.send(ev)
@@ -312,6 +440,7 @@ class EventsClient:
             # do we need a strategy for resending unconfirmed events?
             return None
 
+    @override
     async def subscribe(
         self,
         stream: StreamType,
@@ -324,7 +453,7 @@ class EventsClient:
             msg = "timespamp should be timezone-aware value"
             raise TypeError(msg)
         ev = Subscribe(stream=stream, filters=filters, timestamp=timestamp)
-        loop = asyncio.get_running_loop()
+        loop = self._lazy_init()
         fut: asyncio.Future[Subscribed] = loop.create_future()
         self._subscribed[ev.id] = fut
         self._subscriptions[stream] = _SubscrData(
@@ -346,6 +475,7 @@ class EventsClient:
             # Thus, the method never fails
             self._subscribed.pop(ev.id, None)
 
+    @override
     async def subscribe_group(
         self,
         stream: StreamType,
@@ -356,7 +486,7 @@ class EventsClient:
         ev = SubscribeGroup(
             stream=stream, filters=filters, groupname=GroupName(self._name)
         )
-        loop = asyncio.get_running_loop()
+        loop = self._lazy_init()
         fut: asyncio.Future[Subscribed] = loop.create_future()
         self._subscribed[ev.id] = fut
         self._subscr_groups[stream] = _SubscrData(
@@ -372,8 +502,10 @@ class EventsClient:
             # Thus, the method never fails
             self._subscribed.pop(ev.id, None)
 
+    @override
     async def ack(
         self, events: dict[StreamType, list[Tag]], *, sender: str | None = None
     ) -> None:
+        self._lazy_init()
         ev = Ack(sender=sender or self._name, events=events)
         await self._raw_client.send(ev)
