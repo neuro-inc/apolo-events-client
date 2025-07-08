@@ -1,4 +1,10 @@
-from ._client import EventsClient, RawEventsClient
+from ._client import (
+    AbstractEventsClient,
+    DummyEventsClient,
+    EventsClient,
+    RawEventsClient,
+)
+from ._config import EventsClientConfig, from_config
 from ._exceptions import ServerError
 from ._messages import (
     Ack,
@@ -36,15 +42,18 @@ from ._messages import (
 
 
 __all__ = (
+    "AbstractEventsClient",
     "Ack",
     "BaseSubscribe",
     "BatchItem",
     "ClientMessage",
     "ClientMsgTypes",
+    "DummyEventsClient",
     "Error",
     "EventType",
     "EventType",
     "EventsClient",
+    "EventsClientConfig",
     "FilterItem",
     "GroupName",
     "JsonT",
@@ -77,4 +86,5 @@ __all__ = (
     "Subscribed",
     "Tag",
     "Type",
+    "from_config",
 )

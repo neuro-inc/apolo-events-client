@@ -57,8 +57,7 @@ asyncio_default_fixture_loop_scope = "function"
 testpaths = "tests"
 filterwarnings = """
     error
-    ignore::DeprecationWarning
-    ignore:Unclosed connection:ResourceWarning:aiohttp
+    ignore::DeprecationWarning:pydantic
     """
 
 addopts = """
