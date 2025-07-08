@@ -155,19 +155,10 @@ class RawEventsClient:
 
 
 @dataclasses.dataclass(kw_only=True)
-class _BaseSubscrData:
+class _SubscrData:
     filters: tuple[FilterItem, ...] | None
     callback: Callable[[RecvEvent], Awaitable[None]]
-
-
-@dataclasses.dataclass(kw_only=True)
-class _SubscrData(_BaseSubscrData):
-    timestamp: datetime
-
-
-@dataclasses.dataclass(kw_only=True)
-class _SubscrGroupData(_BaseSubscrData):
-    groupname: GroupName
+    timestamp: datetime | None = None
 
 
 class EventsClient:
@@ -176,9 +167,9 @@ class EventsClient:
         *,
         url: URL | str,
         token: str,
+        name: str,
         ping_delay: float = 60,
         resp_timeout: float = 30,
-        sender: str | None = None,
     ) -> None:
         self._closing = False
         self._raw_client = RawEventsClient(
@@ -188,13 +179,13 @@ class EventsClient:
             on_ws_connect=self._on_ws_connect,
         )
         self._resp_timeout = resp_timeout
-        self._sender = sender
+        self._name = name
         self._task = asyncio.create_task(self._loop())
 
         self._sent: dict[UUID, asyncio.Future[SentItem]] = {}
         self._subscribed: dict[UUID, asyncio.Future[Subscribed]] = {}
         self._subscriptions: dict[StreamType, _SubscrData] = {}
-        self._subscr_groups: dict[StreamType, _SubscrGroupData] = {}
+        self._subscr_groups: dict[StreamType, _SubscrData] = {}
 
     async def __aenter__(self) -> Self:
         await self._raw_client.__aenter__()
@@ -254,47 +245,37 @@ class EventsClient:
                         await data2.callback(ev)
 
     async def _on_ws_connect(self) -> None:
-        for stream, data1 in self._subscriptions.items():
+        for stream, data in self._subscriptions.items():
             try:
                 await self.subscribe(
                     stream=stream,
-                    filters=data1.filters,
-                    timestamp=data1.timestamp,
-                    callback=data1.callback,
+                    filters=data.filters,
+                    timestamp=data.timestamp,
+                    callback=data.callback,
                 )
             except Exception:
                 log.exception(
                     "Failed subscribe(%r, %r, filters=%r, timestamp=%r)",
                     stream,
-                    data1.callback,
-                    data1.filters,
-                    data1.timestamp,
+                    data.callback,
+                    data.filters,
+                    data.timestamp,
                 )
-        for stream, data2 in self._subscr_groups.items():
+        for stream, data in self._subscr_groups.items():
+            assert data.timestamp is None
             try:
                 await self.subscribe_group(
                     stream=stream,
-                    filters=data2.filters,
-                    groupname=data2.groupname,
-                    callback=data2.callback,
+                    filters=data.filters,
+                    callback=data.callback,
                 )
             except Exception:
                 log.exception(
-                    "Failed subscribe_group(%r, %r, %r, filters=%r)",
+                    "Failed subscribe_group(%r, %r, filters=%r)",
                     stream,
-                    data2.groupname,
-                    data2.callback,
-                    data2.filters,
+                    data.callback,
+                    data.filters,
                 )
-
-    def _get_sender(self, sender: str | None) -> str:
-        if sender is not None:
-            return sender
-        sender = self._sender
-        if sender is not None:
-            return sender
-        msg = "Either initialize EventsClient with a sender or pass it explicitly"
-        raise ValueError(msg)
 
     async def send(
         self,
@@ -309,7 +290,7 @@ class EventsClient:
         **kwargs: JsonT,
     ) -> SentItem | None:
         ev = SendEvent(
-            sender=self._get_sender(sender),
+            sender=sender or self._name,
             stream=stream,
             event_type=event_type,
             org=org,
@@ -356,9 +337,10 @@ class EventsClient:
             async with asyncio.timeout(self._resp_timeout):
                 ret = await fut
             # reconnection could bump the timestamp
-            self._subscriptions[stream].timestamp = max(
-                ret.timestamp, self._subscriptions[stream].timestamp
-            )
+            dt = self._subscriptions[stream].timestamp
+            if dt is None:
+                dt = datetime.fromtimestamp(1, tz=UTC)  # far in the past
+            self._subscriptions[stream].timestamp = max(ret.timestamp, dt)
         except TimeoutError:
             # On reconnection, we re-subscribe for everything.
             # Thus, the method never fails
@@ -367,28 +349,24 @@ class EventsClient:
     async def subscribe_group(
         self,
         stream: StreamType,
-        groupname: GroupName,
         callback: Callable[[RecvEvent], Awaitable[None]],
         *,
         filters: Sequence[FilterItem] | None = None,
     ) -> None:
-        ev = SubscribeGroup(stream=stream, filters=filters, groupname=groupname)
+        ev = SubscribeGroup(
+            stream=stream, filters=filters, groupname=GroupName(self._name)
+        )
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[Subscribed] = loop.create_future()
         self._subscribed[ev.id] = fut
-        self._subscr_groups[stream] = _SubscrGroupData(
+        self._subscr_groups[stream] = _SubscrData(
             filters=ev.filters,
-            groupname=groupname,
             callback=callback,
         )
         await self._raw_client.send(ev)
         try:
             async with asyncio.timeout(self._resp_timeout):
-                ret = await fut
-            # reconnection could bump the timestamp
-            self._subscriptions[stream].timestamp = max(
-                ret.timestamp, self._subscriptions[stream].timestamp
-            )
+                await fut
         except TimeoutError:
             # On reconnection, we re-subscribe for everything.
             # Thus, the method never fails
@@ -397,5 +375,5 @@ class EventsClient:
     async def ack(
         self, events: dict[StreamType, list[Tag]], *, sender: str | None = None
     ) -> None:
-        ev = Ack(sender=self._get_sender(sender), events=events)
+        ev = Ack(sender=sender or self._name, events=events)
         await self._raw_client.send(ev)
