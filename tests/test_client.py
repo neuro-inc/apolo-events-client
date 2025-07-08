@@ -16,7 +16,6 @@ from apolo_events_client import (
     EventsClient,
     EventType,
     FilterItem,
-    GroupName,
     Message,
     RawEventsClient,
     RecvEvent,
@@ -124,9 +123,7 @@ async def raw_client(server: App, token: str) -> AsyncIterator[RawEventsClient]:
 
 @pytest.fixture
 async def client(server: App, token: str) -> AsyncIterator[EventsClient]:
-    cl = EventsClient(
-        url=server.url, token=token, resp_timeout=0.1, sender="test-sender"
-    )
+    cl = EventsClient(url=server.url, token=token, name="test-client", resp_timeout=0.1)
     yield cl
     await cl.aclose()
 
@@ -251,7 +248,6 @@ async def test_subscribe_group(server: App, client: EventsClient) -> None:
 
     await client.subscribe_group(
         stream=StreamType("test-stream"),
-        groupname=GroupName("group-name"),
         callback=cb,
         filters=[FilterItem(orgs=["o1"], projects=["p1", "p2"])],
     )
@@ -260,7 +256,7 @@ async def test_subscribe_group(server: App, client: EventsClient) -> None:
     assert isinstance(ev, SubscribeGroup)
     assert ev.stream == "test-stream"
     assert ev.filters == (FilterItem(orgs=["o1"], projects=["p1", "p2"]),)
-    assert ev.groupname == "group-name"
+    assert ev.groupname == "test-client"
 
 
 async def test_resubscribe(server: App, client: EventsClient) -> None:
