@@ -266,6 +266,6 @@ class Error(Response):
 
 
 ClientMsgTypes = Ping | SendEvent | SendBatch | Subscribe | SubscribeGroup | Ack
-ClientMessage = RootModel[Annotated[ClientMsgTypes, Field(descriminator="kind")]]
+ClientMessage = RootModel[Annotated[ClientMsgTypes, Field(discriminator="kind")]]
 ServerMsgTypes = Pong | Sent | Subscribed | RecvEvents | RecvPastEvents | Error
-ServerMessage = RootModel[Annotated[ServerMsgTypes, Field(descriminator="kind")]]
+ServerMessage = RootModel[Annotated[ServerMsgTypes, Field(discriminator="kind")]]

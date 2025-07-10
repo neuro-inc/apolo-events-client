@@ -122,7 +122,7 @@ class RawEventsClient:
             try:
                 ws_msg = await ws.receive()
             except aiohttp.ClientError:
-                log.info("Reconnect on transport error", exc_info=True)
+                log.info("Disconnect on transport error", exc_info=True)
                 await self._close_ws(ws)
                 return None
             if ws_msg.type in (
@@ -130,7 +130,7 @@ class RawEventsClient:
                 aiohttp.WSMsgType.CLOSING,
                 aiohttp.WSMsgType.CLOSED,
             ):
-                log.info("Reconnect on closing transport [%s]", ws_msg.type)
+                log.info("Disconnect on closing transport [%s]", ws_msg.type)
                 self._ws = None
                 return None
             if ws_msg.type == aiohttp.WSMsgType.BINARY:
@@ -456,12 +456,12 @@ class EventsClient(AbstractEventsClient):
         loop = self._lazy_init()
         fut: asyncio.Future[Subscribed] = loop.create_future()
         self._subscribed[ev.id] = fut
+        await self._raw_client.send(ev)
         self._subscriptions[stream] = _SubscrData(
             filters=ev.filters,
             timestamp=ev.timestamp or datetime.now(tz=UTC),
             callback=callback,
         )
-        await self._raw_client.send(ev)
         try:
             async with asyncio.timeout(self._resp_timeout):
                 ret = await fut
@@ -489,11 +489,11 @@ class EventsClient(AbstractEventsClient):
         loop = self._lazy_init()
         fut: asyncio.Future[Subscribed] = loop.create_future()
         self._subscribed[ev.id] = fut
+        await self._raw_client.send(ev)
         self._subscr_groups[stream] = _SubscrData(
             filters=ev.filters,
             callback=callback,
         )
-        await self._raw_client.send(ev)
         try:
             async with asyncio.timeout(self._resp_timeout):
                 await fut
