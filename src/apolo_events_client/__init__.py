@@ -41,6 +41,9 @@ from ._messages import (
 )
 
 
+from ._events import ProjectRemoveEvent, ClusterAddEvent, ClusterUpdateEvent, ClusterRemoveEvent
+
+
 __all__ = (
     "AbstractEventsClient",
     "Ack",
@@ -87,4 +90,5 @@ __all__ = (
     "Tag",
     "Type",
     "from_config",
+    "ProjectRemoveEvent", "ClusterAddEvent", "ClusterUpdateEvent", "ClusterRemoveEvent"
 )

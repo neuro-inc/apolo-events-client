@@ -17,6 +17,8 @@ class BaseEvent(BaseModel):
     timestamp: AwareDatetime | None = None
 
 
+# platform-admin
+
 class ProjectRemoveEvent(BaseEvent):
     stream: Literal["platform-admin"] = "platform-admin"
     event_type: Literal["project-remove"] = "project-remove"
@@ -26,11 +28,29 @@ class ProjectRemoveEvent(BaseEvent):
     user: str
 
 
-class TestEvent(BaseEvent):
-    # remove me later
-    stream: Literal["test"] = "test"
-    event_type: Literal["test"] = "test"
+# platform-config
 
+class ClusterAddEvent(BaseEvent):
+    # remove me later
+    stream: Literal["platform-config"] = "platform-config"
+    event_type: Literal["cluster-add"] = "cluster-add"
+    cluster: str
+    user: str
+
+class ClusterUpdateEvent(BaseEvent):
+    # remove me later
+    stream: Literal["platform-config"] = "platform-config"
+    event_type: Literal["cluster-update"] = "cluster-update"
+    cluster: str
+    user: str
+
+class ClusterRemoveEvent(BaseEvent):
+    # remove me later
+    stream: Literal["platform-config"] = "platform-config"
+    event_type: Literal["cluster-remove"] = "cluster-remove"
+    cluster: str
+    user: str
+    
 
 EventTypes = ProjectRemoveEvent | TestEvent
 
