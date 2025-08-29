@@ -426,6 +426,49 @@ async def test_recv_group_auto_ack(server: App, client: EventsClient) -> None:
     }
 
 
+async def test_recv_group_no_auto_ack_on_error(
+    server: App, client: EventsClient
+) -> None:
+    async def gen_subscr(
+        srv_ws: web.WebSocketResponse, event: ClientMsgTypes
+    ) -> list[Response]:
+        return [
+            Subscribed(subscr_id=event.id),
+            RecvEvents(
+                subscr_id=event.id,
+                events=[
+                    RecvEvent(
+                        tag="123",
+                        timestamp=now(),
+                        sender="test-sender",
+                        stream="test-stream",
+                        event_type="event-type",
+                    )
+                ],
+            ),
+        ]
+
+    server.add_resp(SubscribeGroup, gen_subscr)
+
+    lst: list[RecvEvent] = []
+
+    async def cb(resp: RecvEvent) -> None:
+        txt = "Not handled"
+        raise Exception(txt)
+
+    await client.subscribe_group(
+        auto_ack=True,
+        stream=StreamType("test-stream"),
+        callback=cb,
+    )
+
+    await asyncio.sleep(0.1)
+    assert len(lst) == 0
+
+    assert len(server.events) == 1
+    assert isinstance(server.events[0], SubscribeGroup)
+
+
 async def test_ack(server: App, client: EventsClient) -> None:
     async def gen_subscr(
         srv_ws: web.WebSocketResponse, event: ClientMsgTypes
