@@ -69,18 +69,18 @@ class RawEventsClient:
             self._session = aiohttp.ClientSession()
 
         if self._ws is None or self._ws.closed:
-            self._connected.clear()
             async with self._lock:
                 if self._ws is None or self._ws.closed:
+                    self._connected.clear()
                     self._ws = await self._session.ws_connect(
                         self._url / "v1" / "stream",
                         headers={hdrs.AUTHORIZATION: "Bearer " + self._token},
                     )
                     await self._on_ws_connect()
                     self._connected.set()
-        else:
-            await self._connected.wait()
+
         assert self._ws is not None
+        await self._connected.wait()
         return self._ws
 
     async def __aenter__(self) -> Self:
