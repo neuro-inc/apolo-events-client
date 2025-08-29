@@ -247,6 +247,7 @@ async def test_subscribe_group(server: App, client: EventsClient) -> None:
         pass
 
     await client.subscribe_group(
+        auto_ack=False,
         stream=StreamType("test-stream"),
         callback=cb,
         filters=[FilterItem(orgs=["o1"], projects=["p1", "p2"])],
@@ -336,6 +337,93 @@ async def test_recv(server: App, client: EventsClient) -> None:
     await asyncio.sleep(0.1)
     assert len(lst) == 1
     assert lst[0].event_type == "event-type"
+
+
+async def test_recv_group(server: App, client: EventsClient) -> None:
+    async def gen_subscr(
+        srv_ws: web.WebSocketResponse, event: ClientMsgTypes
+    ) -> list[Response]:
+        return [
+            Subscribed(subscr_id=event.id),
+            RecvEvents(
+                subscr_id=event.id,
+                events=[
+                    RecvEvent(
+                        tag="123",
+                        timestamp=now(),
+                        sender="test-sender",
+                        stream="test-stream",
+                        event_type="event-type",
+                    )
+                ],
+            ),
+        ]
+
+    server.add_resp(SubscribeGroup, gen_subscr)
+
+    lst: list[RecvEvent] = []
+
+    async def cb(resp: RecvEvent) -> None:
+        lst.append(resp)
+
+    await client.subscribe_group(
+        auto_ack=False,
+        stream=StreamType("test-stream"),
+        callback=cb,
+    )
+
+    await asyncio.sleep(0.1)
+    assert len(lst) == 1
+    assert lst[0].event_type == "event-type"
+
+
+async def test_recv_group_auto_ack(server: App, client: EventsClient) -> None:
+    async def gen_subscr(
+        srv_ws: web.WebSocketResponse, event: ClientMsgTypes
+    ) -> list[Response]:
+        return [
+            Subscribed(subscr_id=event.id),
+            RecvEvents(
+                subscr_id=event.id,
+                events=[
+                    RecvEvent(
+                        tag="123",
+                        timestamp=now(),
+                        sender="test-sender",
+                        stream="test-stream",
+                        event_type="event-type",
+                    )
+                ],
+            ),
+        ]
+
+    server.add_resp(SubscribeGroup, gen_subscr)
+
+    lst: list[RecvEvent] = []
+
+    async def cb(resp: RecvEvent) -> None:
+        lst.append(resp)
+
+    await client.subscribe_group(
+        auto_ack=True,
+        stream=StreamType("test-stream"),
+        callback=cb,
+    )
+
+    await asyncio.sleep(0.1)
+    assert len(lst) == 1
+    assert lst[0].event_type == "event-type"
+
+    assert len(server.events) == 2
+    assert isinstance(server.events[0], SubscribeGroup)
+    ev = server.events[1]
+    assert isinstance(ev, Ack)
+    assert ev.sender == "test-client"
+    assert ev.events == {
+        "test-stream": [
+            "123",
+        ],
+    }
 
 
 async def test_ack(server: App, client: EventsClient) -> None:

@@ -2,6 +2,7 @@ import abc
 import asyncio
 import dataclasses
 import logging
+from collections import defaultdict
 from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from types import TracebackType
@@ -58,6 +59,7 @@ class RawEventsClient:
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._ping_delay = ping_delay
         self._on_ws_connect = on_ws_connect
+        self._connected = asyncio.Event()
 
     async def _lazy_init(self) -> aiohttp.ClientWebSocketResponse:
         if self._closing:
@@ -67,6 +69,7 @@ class RawEventsClient:
             self._session = aiohttp.ClientSession()
 
         if self._ws is None or self._ws.closed:
+            self._connected.clear()
             async with self._lock:
                 if self._ws is None or self._ws.closed:
                     self._ws = await self._session.ws_connect(
@@ -74,6 +77,9 @@ class RawEventsClient:
                         headers={hdrs.AUTHORIZATION: "Bearer " + self._token},
                     )
                     await self._on_ws_connect()
+                    self._connected.set()
+        else:
+            await self._connected.wait()
         assert self._ws is not None
         return self._ws
 
@@ -108,6 +114,10 @@ class RawEventsClient:
         while not self._closing:
             ws = await self._lazy_init()
             try:
+                from ._messages import Kind
+
+                if msg.kind == Kind.SUBSCRIBE_GROUP:
+                    pass  # breakpoint()
                 await ws.send_str(msg.model_dump_json())
                 return
             except aiohttp.ClientError:
@@ -161,6 +171,7 @@ class _SubscrData:
     filters: tuple[FilterItem, ...] | None
     callback: Callable[[RecvEvent], Awaitable[None]]
     timestamp: datetime | None = None
+    auto_ack: bool | None = None
 
 
 class CtorArgs(TypedDict):
@@ -219,6 +230,7 @@ class AbstractEventsClient(abc.ABC):
         stream: StreamType,
         callback: Callable[[RecvEvent], Awaitable[None]],
         *,
+        auto_ack: bool,
         filters: Sequence[FilterItem] | None = None,
     ) -> None:
         pass
@@ -267,6 +279,7 @@ class DummyEventsClient(AbstractEventsClient):
         stream: StreamType,
         callback: Callable[[RecvEvent], Awaitable[None]],
         *,
+        auto_ack: bool,
         filters: Sequence[FilterItem] | None = None,
     ) -> None:
         pass
@@ -303,9 +316,10 @@ class EventsClient(AbstractEventsClient):
         self._subscribed: dict[UUID, asyncio.Future[Subscribed]] = {}
         self._subscriptions: dict[StreamType, _SubscrData] = {}
         self._subscr_groups: dict[StreamType, _SubscrData] = {}
+        self._resubscribe: set[StreamType] = set()
+        self._resubscribe_group: set[StreamType] = set()
 
     async def __aenter__(self) -> Self:
-        self._lazy_init()
         await self._raw_client.__aenter__()
         return self
 
@@ -323,12 +337,6 @@ class EventsClient(AbstractEventsClient):
     async def aclose(self) -> None:
         self._closing = True
         await self._raw_client.aclose()
-
-    def _lazy_init(self) -> asyncio.AbstractEventLoop:
-        loop = asyncio.get_running_loop()
-        if self._task is None:
-            self._task = asyncio.create_task(self._loop())
-        return loop
 
     async def _loop(self) -> None:
         try:
@@ -362,17 +370,44 @@ class EventsClient(AbstractEventsClient):
                         "Received Subscribed response for unknown id %s", msg.id
                     )
             case _RecvEvents():
+                auto_acks: defaultdict[StreamType, list[Tag]] = defaultdict(list)
                 for ev in msg.events:
                     stream = ev.stream
                     data1 = self._subscriptions.get(stream)
                     if data1:
-                        await data1.callback(ev)
+                        try:
+                            await data1.callback(ev)
+                            data1.timestamp = ev.timestamp
+                        except Exception:
+                            log.exception(
+                                "Unhandled error during processing %r(%r)",
+                                data1.callback,
+                                msg,
+                            )
+
                     data2 = self._subscr_groups.get(stream)
                     if data2:
-                        await data2.callback(ev)
+                        try:
+                            await data2.callback(ev)
+                            if data2.auto_ack:
+                                auto_acks[stream].append(ev.tag)
+                        except Exception:
+                            log.exception(
+                                "Unhandled error during processing %r(%r)",
+                                data2.callback,
+                                msg,
+                            )
+
+                if auto_acks:
+                    await self.ack(auto_acks)
 
     async def _on_ws_connect(self) -> None:
-        for stream, data in self._subscriptions.items():
+        if self._task is None:
+            # start receiver
+            self._task = asyncio.create_task(self._loop())
+        for stream in self._resubscribe:
+            data = self._subscriptions[stream]
+            assert data.auto_ack is None
             try:
                 await self.subscribe(
                     stream=stream,
@@ -388,13 +423,16 @@ class EventsClient(AbstractEventsClient):
                     data.filters,
                     data.timestamp,
                 )
-        for stream, data in self._subscr_groups.items():
+        for stream in self._resubscribe_group:
+            data = self._subscr_groups[stream]
             assert data.timestamp is None
+            assert data.auto_ack is not None
             try:
                 await self.subscribe_group(
                     stream=stream,
                     filters=data.filters,
                     callback=data.callback,
+                    auto_ack=data.auto_ack,
                 )
             except Exception:
                 log.exception(
@@ -427,7 +465,7 @@ class EventsClient(AbstractEventsClient):
             user=user,
             **kwargs,
         )
-        loop = self._lazy_init()
+        loop = asyncio.get_running_loop()
         fut: asyncio.Future[SentItem] = loop.create_future()
         self._sent[ev.id] = fut
         await self._raw_client.send(ev)
@@ -453,23 +491,19 @@ class EventsClient(AbstractEventsClient):
             msg = "timespamp should be timezone-aware value"
             raise TypeError(msg)
         ev = Subscribe(stream=stream, filters=filters, timestamp=timestamp)
-        loop = self._lazy_init()
+        loop = asyncio.get_running_loop()
         fut: asyncio.Future[Subscribed] = loop.create_future()
         self._subscribed[ev.id] = fut
-        await self._raw_client.send(ev)
         self._subscriptions[stream] = _SubscrData(
             filters=ev.filters,
             timestamp=ev.timestamp or datetime.now(tz=UTC),
             callback=callback,
         )
+        await self._raw_client.send(ev)
         try:
             async with asyncio.timeout(self._resp_timeout):
-                ret = await fut
-            # reconnection could bump the timestamp
-            dt = self._subscriptions[stream].timestamp
-            if dt is None:
-                dt = datetime.fromtimestamp(1, tz=UTC)  # far in the past
-            self._subscriptions[stream].timestamp = max(ret.timestamp, dt)
+                await fut
+            self._resubscribe.add(stream)
         except TimeoutError:
             # On reconnection, we re-subscribe for everything.
             # Thus, the method never fails
@@ -481,22 +515,25 @@ class EventsClient(AbstractEventsClient):
         stream: StreamType,
         callback: Callable[[RecvEvent], Awaitable[None]],
         *,
+        auto_ack: bool,
         filters: Sequence[FilterItem] | None = None,
     ) -> None:
         ev = SubscribeGroup(
             stream=stream, filters=filters, groupname=GroupName(self._name)
         )
-        loop = self._lazy_init()
+        loop = asyncio.get_running_loop()
         fut: asyncio.Future[Subscribed] = loop.create_future()
         self._subscribed[ev.id] = fut
-        await self._raw_client.send(ev)
         self._subscr_groups[stream] = _SubscrData(
             filters=ev.filters,
             callback=callback,
+            auto_ack=auto_ack,
         )
+        await self._raw_client.send(ev)
         try:
             async with asyncio.timeout(self._resp_timeout):
                 await fut
+            self._resubscribe_group.add(stream)
         except TimeoutError:
             # On reconnection, we re-subscribe for everything.
             # Thus, the method never fails
@@ -506,6 +543,5 @@ class EventsClient(AbstractEventsClient):
     async def ack(
         self, events: dict[StreamType, list[Tag]], *, sender: str | None = None
     ) -> None:
-        self._lazy_init()
         ev = Ack(sender=sender or self._name, events=events)
         await self._raw_client.send(ev)
