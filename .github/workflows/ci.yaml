@@ -21,7 +21,7 @@ jobs:
       with:
         ref: ${{ github.event.pull_request.head.sha }}
     - name: Install python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: ${{ matrix.py_version }}
     - name: Cache packages
@@ -73,7 +73,7 @@ jobs:
     - name: Checkout commit
       uses: actions/checkout@v5
     - name: Install python
-      uses: actions/setup-python@v5
+      uses: actions/setup-python@v6
       with:
         python-version: 3.13
     - name: Install uv
