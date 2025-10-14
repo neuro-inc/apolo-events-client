@@ -474,8 +474,7 @@ class EventsClient(AbstractEventsClient):
                 return await fut
         except TimeoutError:
             self._sent.pop(ev.id, None)
-            # in case of timeout, we don't want to raise an exception
-            # do we need a strategy for resending unconfirmed events?
+            log.warning("Send timeout for %s/%s", stream, event_type)
             return None
 
     @override
