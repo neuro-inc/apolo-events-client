@@ -17,7 +17,7 @@ jobs:
         py_version: ['3.13']
     steps:
     - name: Checkout commit
-      uses: actions/checkout@v5
+      uses: actions/checkout@v6
       with:
         ref: ${{ github.event.pull_request.head.sha }}
     - name: Install python
@@ -71,7 +71,7 @@ jobs:
       id-token: write  # IMPORTANT: mandatory for trusted publishing & sigstore
     steps:
     - name: Checkout commit
-      uses: actions/checkout@v5
+      uses: actions/checkout@v6
     - name: Install python
       uses: actions/setup-python@v6
       with:
