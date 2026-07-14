@@ -12,4 +12,5 @@ lint:
 	uv run mypy
 
 .PHONY: clean
+clean:
 	git clean -f
