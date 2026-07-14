@@ -96,6 +96,7 @@ class RawEventsClient:
 
     async def aclose(self) -> None:
         self._closing = True
+        self._connected.clear()
         if self._ws is not None:
             ws = self._ws
             self._ws = None
@@ -107,17 +108,20 @@ class RawEventsClient:
     async def _close_ws(self, ws: aiohttp.ClientWebSocketResponse) -> None:
         if self._ws is ws:
             self._ws = None
+            self._connected.clear()
             await ws.close()
+
+    async def reset(self) -> None:
+        """Reset the current transport so the next operation reconnects."""
+        ws = self._ws
+        if ws is not None:
+            await self._close_ws(ws)
 
     async def send(self, msg: ClientMsgTypes) -> None:
         """Send a message through the wire."""
         while not self._closing:
             ws = await self._lazy_init()
             try:
-                from ._messages import Kind
-
-                if msg.kind == Kind.SUBSCRIBE_GROUP:
-                    pass  # breakpoint()
                 await ws.send_str(msg.model_dump_json())
                 return
             except aiohttp.ClientError:
@@ -141,7 +145,7 @@ class RawEventsClient:
                 aiohttp.WSMsgType.CLOSED,
             ):
                 log.info("Disconnect on closing transport [%s]", ws_msg.type)
-                self._ws = None
+                await self._close_ws(ws)
                 return None
             if ws_msg.type == aiohttp.WSMsgType.BINARY:
                 log.warning("Ignore unexpected BINARY message")
@@ -311,6 +315,9 @@ class EventsClient(AbstractEventsClient):
         self._resp_timeout = resp_timeout
         self._name = name
         self._task: asyncio.Task[None] | None = None
+        self._resubscribe_task: asyncio.Task[None] | None = None
+        self._resubscribe_again = False
+        self._has_connected = False
 
         self._sent: dict[UUID, asyncio.Future[SentItem]] = {}
         self._subscribed: dict[UUID, asyncio.Future[Subscribed]] = {}
@@ -330,22 +337,57 @@ class EventsClient(AbstractEventsClient):
         exc_tb: TracebackType | None,
     ) -> None:
         await self.aclose()
-        if self._task is not None:
-            await self._task
 
     @override
     async def aclose(self) -> None:
+        if self._closing:
+            return
         self._closing = True
+
+        for sent_fut in self._sent.values():
+            if not sent_fut.done():
+                sent_fut.cancel()
+        for subscribed_fut in self._subscribed.values():
+            if not subscribed_fut.done():
+                subscribed_fut.cancel()
+        self._sent.clear()
+        self._subscribed.clear()
+
+        current_task = asyncio.current_task()
+        tasks = [
+            task
+            for task in (self._resubscribe_task, self._task)
+            if task is not None and task is not current_task and not task.done()
+        ]
+        for task in tasks:
+            task.cancel()
         await self._raw_client.aclose()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._resubscribe_task = None
+        if self._task is not current_task:
+            self._task = None
+
+    def _fail_pending(self, ex: Exception) -> None:
+        for sent_fut in self._sent.values():
+            if not sent_fut.done():
+                sent_fut.set_exception(ex)
+        for subscribed_fut in self._subscribed.values():
+            if not subscribed_fut.done():
+                subscribed_fut.set_exception(ex)
+        self._sent.clear()
+        self._subscribed.clear()
 
     async def _loop(self) -> None:
-        try:
-            while not self._closing:
+        while not self._closing:
+            try:
                 await self._loop_once()
-        except Exception as ex:
-            for fut in self._sent.values():
-                if not fut.done():
-                    fut.set_exception(ex)
+            except asyncio.CancelledError:
+                raise
+            except Exception as ex:
+                log.exception("Receiver failed; reconnecting")
+                self._fail_pending(ex)
+                await self._raw_client.reset()
 
     async def _loop_once(self) -> None:
         msg = await self._raw_client.receive()
@@ -355,7 +397,7 @@ class EventsClient(AbstractEventsClient):
             case Sent():
                 for event in msg.events:
                     sent_fut = self._sent.pop(event.id, None)
-                    if sent_fut is not None:
+                    if sent_fut is not None and not sent_fut.done():
                         sent_fut.set_result(event)
                     else:
                         log.warning(
@@ -363,7 +405,7 @@ class EventsClient(AbstractEventsClient):
                         )
             case Subscribed():
                 subscr_fut = self._subscribed.pop(msg.subscr_id, None)
-                if subscr_fut is not None:
+                if subscr_fut is not None and not subscr_fut.done():
                     subscr_fut.set_result(msg)
                 else:
                     log.warning(
@@ -402,10 +444,51 @@ class EventsClient(AbstractEventsClient):
                     await self.ack(auto_acks)
 
     async def _on_ws_connect(self) -> None:
-        if self._task is None:
+        if self._task is None or self._task.done():
             # start receiver
-            self._task = asyncio.create_task(self._loop())
-        for stream in self._resubscribe:
+            self._task = asyncio.create_task(self._loop(), name="apolo-events-receiver")
+            self._task.add_done_callback(self._receiver_done)
+
+        is_reconnect = self._has_connected
+        self._has_connected = True
+        if is_reconnect:
+            self._schedule_resubscribe()
+
+    def _receiver_done(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            log.exception("Websocket receiver task stopped")
+
+    def _schedule_resubscribe(self) -> None:
+        if not self._resubscribe and not self._resubscribe_group:
+            return
+        if self._resubscribe_task is not None and not self._resubscribe_task.done():
+            self._resubscribe_again = True
+            return
+        self._resubscribe_again = False
+        task = asyncio.create_task(
+            self._resubscribe_all(), name="apolo-events-resubscribe"
+        )
+        self._resubscribe_task = task
+        task.add_done_callback(self._resubscribe_done)
+
+    def _resubscribe_done(self, task: asyncio.Task[None]) -> None:
+        if self._resubscribe_task is task:
+            self._resubscribe_task = None
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            log.exception("Unhandled error during websocket resubscription")
+        if self._resubscribe_again and not self._closing:
+            self._schedule_resubscribe()
+
+    async def _resubscribe_all(self) -> None:
+        for stream in tuple(self._resubscribe):
             data = self._subscriptions[stream]
             assert data.auto_ack is None
             try:
@@ -423,7 +506,7 @@ class EventsClient(AbstractEventsClient):
                     data.filters,
                     data.timestamp,
                 )
-        for stream in self._resubscribe_group:
+        for stream in tuple(self._resubscribe_group):
             data = self._subscr_groups[stream]
             assert data.timestamp is None
             assert data.auto_ack is not None
@@ -468,14 +551,19 @@ class EventsClient(AbstractEventsClient):
         loop = asyncio.get_running_loop()
         fut: asyncio.Future[SentItem] = loop.create_future()
         self._sent[ev.id] = fut
-        await self._raw_client.send(ev)
         try:
             async with asyncio.timeout(self._resp_timeout):
+                await self._raw_client.send(ev)
                 return await fut
         except TimeoutError:
-            self._sent.pop(ev.id, None)
             log.warning("Send timeout for %s/%s", stream, event_type)
             return None
+        finally:
+            self._sent.pop(ev.id, None)
+            if not fut.done():
+                fut.cancel()
+            elif not fut.cancelled():
+                fut.exception()
 
     @override
     async def subscribe(
@@ -498,15 +586,21 @@ class EventsClient(AbstractEventsClient):
             timestamp=ev.timestamp or datetime.now(tz=UTC),
             callback=callback,
         )
-        await self._raw_client.send(ev)
+        self._resubscribe.add(stream)
         try:
             async with asyncio.timeout(self._resp_timeout):
+                await self._raw_client.send(ev)
                 await fut
-            self._resubscribe.add(stream)
         except TimeoutError:
             # On reconnection, we re-subscribe for everything.
             # Thus, the method never fails
+            pass
+        finally:
             self._subscribed.pop(ev.id, None)
+            if not fut.done():
+                fut.cancel()
+            elif not fut.cancelled():
+                fut.exception()
 
     @override
     async def subscribe_group(
@@ -528,19 +622,29 @@ class EventsClient(AbstractEventsClient):
             callback=callback,
             auto_ack=auto_ack,
         )
-        await self._raw_client.send(ev)
+        self._resubscribe_group.add(stream)
         try:
             async with asyncio.timeout(self._resp_timeout):
+                await self._raw_client.send(ev)
                 await fut
-            self._resubscribe_group.add(stream)
         except TimeoutError:
             # On reconnection, we re-subscribe for everything.
             # Thus, the method never fails
+            pass
+        finally:
             self._subscribed.pop(ev.id, None)
+            if not fut.done():
+                fut.cancel()
+            elif not fut.cancelled():
+                fut.exception()
 
     @override
     async def ack(
         self, events: dict[StreamType, list[Tag]], *, sender: str | None = None
     ) -> None:
         ev = Ack(sender=sender or self._name, events=events)
-        await self._raw_client.send(ev)
+        try:
+            async with asyncio.timeout(self._resp_timeout):
+                await self._raw_client.send(ev)
+        except TimeoutError:
+            log.warning("Ack timeout")
