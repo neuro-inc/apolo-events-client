@@ -24,13 +24,20 @@ jobs:
       uses: actions/setup-python@v6
       with:
         python-version: ${{ matrix.py_version }}
-    - name: Cache packages
+    - name: Generate pre-commit cache key
+      run: echo "PYTHON_HASH=$(python -VV | sha256sum | cut -d' ' -f1)" >> "$GITHUB_ENV"
+    - name: Cache pre-commit environments
       uses: actions/cache@v6
       with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-py-${{ matrix.py_version }}-${{ hashFiles('pyproject.toml') }}
+        path: ~/.cache/pre-commit
+        key: pre-commit-${{ runner.os }}-${{ env.PYTHON_HASH }}-${{ hashFiles('.pre-commit-config.yaml') }}
+        restore-keys: |
+          pre-commit-${{ runner.os }}-${{ env.PYTHON_HASH }}-
     - name: Install uv
       uses: astral-sh/setup-uv@v7
+      with:
+        enable-cache: true
+        cache-dependency-glob: uv.lock
     - name: Install dependencies
       run: uv sync
     - name: Lint
@@ -44,7 +51,8 @@ jobs:
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v7
       with:
-        file: .coverage.xml
+        files: coverage/.coverage.xml
+        disable_search: true
         flags: py${{ matrix.py_version }}
         name: codecov
 
