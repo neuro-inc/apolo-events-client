@@ -2,6 +2,7 @@ import asyncio
 import dataclasses
 import logging
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from weakref import WeakSet
 
 import aiohttp
@@ -14,10 +15,14 @@ from apolo_events_client import (
     ClientMessage,
     ClientMsgTypes,
     EventsClientConfig,
+    SendEvent,
+    Sent,
+    SentItem,
     ServerMsgTypes,
     Subscribe,
     Subscribed,
     SubscribeGroup,
+    Tag,
 )
 
 
@@ -89,6 +94,20 @@ async def events_server(
                     case SubscribeGroup():
                         await ws.send_str(
                             Subscribed(subscr_id=event.id).model_dump_json()
+                        )
+                    case SendEvent():
+                        await events_queues.income.put(event)
+                        await ws.send_str(
+                            Sent(
+                                events=[
+                                    SentItem(
+                                        id=event.id,
+                                        stream=event.stream,
+                                        tag=Tag("1-0"),
+                                        timestamp=datetime.now(UTC),
+                                    )
+                                ]
+                            ).model_dump_json()
                         )
                     case _:
                         await events_queues.income.put(event)
