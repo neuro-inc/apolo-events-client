@@ -57,6 +57,7 @@ class App:
             ]
         ] = []
         self.events: list[ClientMsgTypes] = []
+        self.websockets: list[web.WebSocketResponse] = []
 
     def add_resp(self, ev: type[Message], resp: RespT) -> None:
         self._resps.append((ev, resp))
@@ -67,6 +68,7 @@ class App:
             raise web.HTTPForbidden()
 
         await ws.prepare(req)
+        self.websockets.append(ws)
 
         async for ws_msg in ws:
             assert ws_msg.type == WSMsgType.TEXT
@@ -260,46 +262,49 @@ async def test_subscribe_group(server: App, client: EventsClient) -> None:
     assert ev.groupname == "test-client"
 
 
-async def test_resubscribe(server: App, client: EventsClient) -> None:
+async def test_resubscribe_group_after_reconnect(
+    server: App, client: EventsClient
+) -> None:
+    resubscribe_requested = asyncio.Event()
+    allow_resubscribe_ack = asyncio.Event()
+    attempts = 0
+
     async def gen_subscr(
         srv_ws: web.WebSocketResponse, event: ClientMsgTypes
     ) -> Subscribed:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            resubscribe_requested.set()
+            await allow_resubscribe_ack.wait()
         return Subscribed(subscr_id=event.id)
 
-    server.add_resp(Subscribe, gen_subscr)
-
-    attempt = 0
-
-    async def gen_sent(srv_ws: web.WebSocketResponse, event: ClientMsgTypes) -> Sent:
-        nonlocal attempt
-        attempt += 1
-        if attempt < 2:
-            await srv_ws.close()
-            events = [
-                SentItem(id=uuid4(), stream="test-stream", tag="12345", timestamp=now())
-            ]
-        return Sent(events=events)
-
-    server.add_resp(SendEvent, gen_sent)
+    server.add_resp(SubscribeGroup, gen_subscr)
+    server.add_resp(SubscribeGroup, gen_subscr)
 
     async def cb(resp: RecvEvent) -> None:
         pass
 
-    dt = now()
-    await client.subscribe(
+    await client.subscribe_group(
         stream=StreamType("test-stream"),
         callback=cb,
+        auto_ack=False,
         filters=[FilterItem(orgs=["o1"], projects=["p1", "p2"])],
-        timestamp=dt,
     )
 
-    await client.send(
-        stream=StreamType("test-stream"),
-        event_type=EventType("test-type"),
-    )
+    await server.websockets[0].close()
 
-    # subscr = client._subscriptions[StreamType("test-stream")]
-    # assert subscr.timestamp > dt
+    await asyncio.wait_for(resubscribe_requested.wait(), timeout=1)
+    resubscribe_task = client._resubscribe_task
+    assert resubscribe_task is not None
+    assert not resubscribe_task.done()
+    allow_resubscribe_ack.set()
+    await asyncio.wait_for(asyncio.shield(resubscribe_task), timeout=1)
+
+    assert len(server.websockets) == 2
+    assert not client._subscribed
+    assert all(isinstance(event, SubscribeGroup) for event in server.events)
+    assert server.events[0].id != server.events[1].id
 
 
 async def test_recv(server: App, client: EventsClient) -> None:
@@ -398,6 +403,7 @@ async def test_recv_group_auto_ack(server: App, client: EventsClient) -> None:
         ]
 
     server.add_resp(SubscribeGroup, gen_subscr)
+    server.add_resp(Ack, [])
 
     lst: list[RecvEvent] = []
 
@@ -489,3 +495,254 @@ async def test_ack(server: App, client: EventsClient) -> None:
     assert isinstance(ev, Ack)
     assert ev.sender == "test-sender2"
     assert ev.events == events
+
+
+async def test_send_timeout_includes_raw_send(
+    client: EventsClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client._resp_timeout = 0.01
+
+    async def send_forever(event: ClientMsgTypes) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(client._raw_client, "send", send_forever)
+
+    result = await asyncio.wait_for(
+        client.send(
+            stream=StreamType("test-stream"),
+            event_type=EventType("test-event"),
+        ),
+        timeout=0.2,
+    )
+
+    assert result is None
+    assert not client._sent
+
+
+async def test_send_timeout_includes_connection_establishment(
+    client: EventsClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client._resp_timeout = 0.01
+
+    async def connect_forever() -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(client._raw_client, "_lazy_init", connect_forever)
+
+    result = await asyncio.wait_for(
+        client.send(
+            stream=StreamType("test-stream"),
+            event_type=EventType("test-event"),
+        ),
+        timeout=0.2,
+    )
+
+    assert result is None
+    assert not client._sent
+
+
+async def test_send_timeout_includes_websocket_write(
+    client: EventsClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client._resp_timeout = 0.01
+
+    class BlockingWebsocket:
+        async def send_str(self, data: str) -> None:
+            await asyncio.Event().wait()
+
+    async def connected_websocket() -> BlockingWebsocket:
+        return BlockingWebsocket()
+
+    monkeypatch.setattr(client._raw_client, "_lazy_init", connected_websocket)
+
+    result = await asyncio.wait_for(
+        client.send(
+            stream=StreamType("test-stream"),
+            event_type=EventType("test-event"),
+        ),
+        timeout=0.2,
+    )
+
+    assert result is None
+    assert not client._sent
+
+
+@pytest.mark.parametrize("group", [False, True])
+async def test_subscribe_timeout_includes_raw_send(
+    client: EventsClient, monkeypatch: pytest.MonkeyPatch, group: bool
+) -> None:
+    client._resp_timeout = 0.01
+
+    async def send_forever(event: ClientMsgTypes) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(client._raw_client, "send", send_forever)
+
+    async def callback(event: RecvEvent) -> None:
+        pass
+
+    if group:
+        operation = client.subscribe_group(
+            StreamType("test-stream"), callback, auto_ack=False
+        )
+    else:
+        operation = client.subscribe(StreamType("test-stream"), callback)
+    await asyncio.wait_for(operation, timeout=0.2)
+
+    assert not client._subscribed
+
+
+async def test_ack_timeout_includes_raw_send(
+    client: EventsClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client._resp_timeout = 0.01
+
+    async def send_forever(event: ClientMsgTypes) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(client._raw_client, "send", send_forever)
+
+    await asyncio.wait_for(
+        client.ack({StreamType("test-stream"): [Tag("1")]}), timeout=0.2
+    )
+
+
+@pytest.mark.parametrize("operation_name", ["send", "subscribe", "subscribe_group"])
+async def test_pending_futures_cleaned_on_send_failure(
+    client: EventsClient,
+    monkeypatch: pytest.MonkeyPatch,
+    operation_name: str,
+) -> None:
+    async def send_failure(event: ClientMsgTypes) -> None:
+        msg = "send failed"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(client._raw_client, "send", send_failure)
+
+    async def callback(event: RecvEvent) -> None:
+        pass
+
+    if operation_name == "send":
+        operation = client.send(
+            stream=StreamType("test-stream"),
+            event_type=EventType("test-event"),
+        )
+    elif operation_name == "subscribe":
+        operation = client.subscribe(StreamType("test-stream"), callback)
+    else:
+        operation = client.subscribe_group(
+            StreamType("test-stream"), callback, auto_ack=False
+        )
+
+    with pytest.raises(RuntimeError, match="send failed"):
+        await operation
+
+    assert not client._sent
+    assert not client._subscribed
+
+
+@pytest.mark.parametrize("operation_name", ["send", "subscribe", "subscribe_group"])
+async def test_pending_futures_cleaned_on_cancellation(
+    client: EventsClient,
+    monkeypatch: pytest.MonkeyPatch,
+    operation_name: str,
+) -> None:
+    started = asyncio.Event()
+
+    async def send_forever(event: ClientMsgTypes) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(client._raw_client, "send", send_forever)
+
+    async def callback(event: RecvEvent) -> None:
+        pass
+
+    if operation_name == "send":
+        operation = client.send(
+            stream=StreamType("test-stream"),
+            event_type=EventType("test-event"),
+        )
+    elif operation_name == "subscribe":
+        operation = client.subscribe(StreamType("test-stream"), callback)
+    else:
+        operation = client.subscribe_group(
+            StreamType("test-stream"), callback, auto_ack=False
+        )
+
+    task = asyncio.create_task(operation)
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not client._sent
+    assert not client._subscribed
+
+
+async def test_close_cancels_background_tasks_and_pending_futures(
+    client: EventsClient,
+) -> None:
+    async def run_forever() -> None:
+        await asyncio.Event().wait()
+
+    receiver_task = asyncio.create_task(run_forever())
+    resubscribe_task = asyncio.create_task(run_forever())
+    client._task = receiver_task
+    client._resubscribe_task = resubscribe_task
+    sent = asyncio.get_running_loop().create_future()
+    subscribed = asyncio.get_running_loop().create_future()
+    client._sent[uuid4()] = sent
+    client._subscribed[uuid4()] = subscribed
+
+    await client.aclose()
+
+    assert receiver_task.cancelled()
+    assert resubscribe_task.cancelled()
+    assert sent.cancelled()
+    assert subscribed.cancelled()
+    assert not client._sent
+    assert not client._subscribed
+    assert client._task is None
+    assert client._resubscribe_task is None
+
+
+async def test_reconnects_coalesce_without_overlapping_resubscriptions(
+    client: EventsClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    release_first = asyncio.Event()
+    runs = 0
+    active = 0
+    max_active = 0
+
+    async def resubscribe() -> None:
+        nonlocal active, max_active, runs
+        runs += 1
+        active += 1
+        max_active = max(max_active, active)
+        if runs == 1:
+            first_started.set()
+            await release_first.wait()
+        else:
+            second_started.set()
+        active -= 1
+
+    monkeypatch.setattr(client, "_resubscribe_all", resubscribe)
+    client._resubscribe.add(StreamType("test-stream"))
+
+    client._schedule_resubscribe()
+    await first_started.wait()
+    first_task = client._resubscribe_task
+    client._schedule_resubscribe()
+
+    assert client._resubscribe_task is first_task
+    release_first.set()
+    await asyncio.wait_for(second_started.wait(), timeout=1)
+    second_task = client._resubscribe_task
+    assert second_task is not None
+    await second_task
+
+    assert runs == 2
+    assert max_active == 1
