@@ -9,7 +9,7 @@ from ._constants import PING_DELAY, RESP_TIMEOUT
 @dataclasses.dataclass(frozen=True)
 class EventsClientConfig:
     url: URL
-    token: str
+    token: str = dataclasses.field(repr=False)
     name: str
     ping_delay: float = PING_DELAY
     resp_timeout: float = RESP_TIMEOUT

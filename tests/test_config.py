@@ -25,3 +25,12 @@ def test_real() -> None:
     assert client._raw_client._url == cfg.url
     assert client._raw_client._token == cfg.token
     assert client._name == cfg.name
+
+
+def test_token_is_not_in_repr() -> None:
+    cfg = EventsClientConfig(
+        url=URL("http://example.com"), token="super-secret-token", name="name"
+    )
+
+    assert "super-secret-token" not in repr(cfg)
+    assert cfg.token == "super-secret-token"
