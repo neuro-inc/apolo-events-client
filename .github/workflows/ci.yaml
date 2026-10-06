@@ -69,6 +69,29 @@ jobs:
       with:
         jobs: ${{ toJSON(needs) }}
 
+  approve:
+    name: Approve bot PR
+    runs-on: ubuntu-latest
+    if: endsWith(github.actor, '[bot]')
+    needs: test
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v7
+    - name: metadata
+      id: metadata
+      if: github.actor == 'dependabot[bot]'
+      uses: dependabot/fetch-metadata@v3
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+    - name: Enable auto-merge for bot PRs
+      run: gh pr merge --auto --squash --delete-branch "$PR_URL"
+      env:
+        PR_URL: ${{ github.event.pull_request.html_url }}
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   deploy:
     name: Release client
     runs-on: ubuntu-latest
